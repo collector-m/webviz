@@ -1,14 +1,17 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { parseMessageDefinition } from "rosbag";
+import Bag, { parseMessageDefinition } from "rosbag";
 
-import type { Topic } from "webviz-core/src/types/players";
+import type { Connection } from "webviz-core/src/dataProviders/types";
+import type { Topic } from "webviz-core/src/players/types";
+import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
+
 // TODO(JP): Move all this stuff into rosbag.
 
 type DatatypeDescription = {
@@ -16,12 +19,8 @@ type DatatypeDescription = {
   type: string,
 };
 
-export type Connection = DatatypeDescription & {
-  topic: string,
-};
-
 // Extract one big list of datatypes from the individual connections.
-export function bagConnectionsToDatatypes(connections: $ReadOnlyArray<DatatypeDescription>) {
+export function bagConnectionsToDatatypes(connections: $ReadOnlyArray<DatatypeDescription>): RosDatatypes {
   const datatypes = {};
   connections.forEach((connection) => {
     const connectionTypes = parseMessageDefinition(connection.messageDefinition);
@@ -29,9 +28,9 @@ export function bagConnectionsToDatatypes(connections: $ReadOnlyArray<DatatypeDe
       // The first definition usually doesn't have an explicit name,
       // so we get the name from the connection.
       if (index === 0) {
-        datatypes[connection.type] = definitions;
+        datatypes[connection.type] = { fields: definitions };
       } else if (name) {
-        datatypes[name] = definitions;
+        datatypes[name] = { fields: definitions };
       }
     });
   });
@@ -39,10 +38,19 @@ export function bagConnectionsToDatatypes(connections: $ReadOnlyArray<DatatypeDe
 }
 
 // Extract one big list of topics from the individual connections.
-export function bagConnectionsToTopics(connections: $ReadOnlyArray<Connection>): Topic[] {
+export function bagConnectionsToTopics(
+  connections: $ReadOnlyArray<Connection>,
+  chunkInfos: typeof Bag.prototype.chunkInfos
+): Topic[] {
+  const numMessagesByConnectionIndex: number[] = new Array(connections.length).fill(0);
+  chunkInfos.forEach((info) => {
+    info.connections.forEach(({ conn, count }) => {
+      numMessagesByConnectionIndex[conn] += count;
+    });
+  });
   // Use an object to deduplicate topics.
   const topics: { [string]: Topic } = {};
-  connections.forEach((connection) => {
+  connections.forEach((connection, index) => {
     const existingTopic = topics[connection.topic];
     if (existingTopic && existingTopic.datatype !== connection.type) {
       console.warn("duplicate topic with differing datatype", existingTopic, connection);
@@ -51,6 +59,7 @@ export function bagConnectionsToTopics(connections: $ReadOnlyArray<Connection>):
     topics[connection.topic] = {
       name: connection.topic,
       datatype: connection.type,
+      numMessages: numMessagesByConnectionIndex[index],
     };
   });
   // Satisfy flow by using `Object.keys` instead of `Object.values`

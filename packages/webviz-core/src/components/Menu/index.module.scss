@@ -1,4 +1,4 @@
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -37,6 +37,20 @@
     &:hover {
       background-color: transparent;
       color: $text-disabled;
+    }
+  }
+
+  &.header {
+    text-transform: uppercase;
+    opacity: 0.6;
+    font-size: 11px;
+    letter-spacing: 1px;
+    padding-top: 16px;
+
+    &:hover {
+      cursor: default;
+      background-color: inherit; // disable usual item hover color
+      opacity: 0.5;
     }
   }
 }

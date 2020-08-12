@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -35,12 +35,14 @@ describe("bagConnectionsToDatatypes", () => {
         },
       ])
     ).toEqual({
-      "something/points": [{ name: "points", type: "geometry_msgs/Point", isArray: true, isComplex: true }],
-      "something/two_points": [
-        { name: "point1", type: "geometry_msgs/Point", isArray: false, isComplex: true },
-        { name: "point2", type: "geometry_msgs/Point", isArray: false, isComplex: true },
-      ],
-      "geometry_msgs/Point": [{ name: "x", type: "float64", isArray: false, isComplex: false }],
+      "something/points": { fields: [{ name: "points", type: "geometry_msgs/Point", isArray: true, isComplex: true }] },
+      "something/two_points": {
+        fields: [
+          { name: "point1", type: "geometry_msgs/Point", isArray: false, isComplex: true },
+          { name: "point2", type: "geometry_msgs/Point", isArray: false, isComplex: true },
+        ],
+      },
+      "geometry_msgs/Point": { fields: [{ name: "x", type: "float64", isArray: false, isComplex: false }] },
     });
   });
 });
@@ -48,31 +50,39 @@ describe("bagConnectionsToDatatypes", () => {
 describe("bagConnectionsToTopics", () => {
   it("extracts one big list from multiple connections (even with duplicate topics)", () => {
     expect(
-      bagConnectionsToTopics([
-        {
-          topic: "/some/topic/with/points",
-          type: "something/points",
-          messageDefinition: "",
-        },
-        {
-          topic: "/some/topic/with/points",
-          type: "something/points",
-          messageDefinition: "",
-        },
-        {
-          topic: "/some/topic/with/two_points",
-          type: "something/two_points",
-          messageDefinition: "",
-        },
-      ])
+      bagConnectionsToTopics(
+        [
+          {
+            topic: "/some/topic/with/points",
+            type: "something/points",
+            messageDefinition: "",
+            md5sum: "",
+          },
+          {
+            topic: "/some/topic/with/points",
+            type: "something/points",
+            messageDefinition: "",
+            md5sum: "",
+          },
+          {
+            topic: "/some/topic/with/two_points",
+            type: "something/two_points",
+            messageDefinition: "",
+            md5sum: "",
+          },
+        ],
+        []
+      )
     ).toEqual([
       {
         name: "/some/topic/with/points",
         datatype: "something/points",
+        numMessages: 0,
       },
       {
         name: "/some/topic/with/two_points",
         datatype: "something/two_points",
+        numMessages: 0,
       },
     ]);
   });

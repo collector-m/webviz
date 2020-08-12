@@ -1,12 +1,13 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { makeCommand, withPose, pointToVec3, defaultBlend } from "regl-worldview";
+import * as React from "react";
+import { Command, withPose, pointToVec3, defaultBlend, type CommonCommandProps } from "regl-worldview";
 
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import { TextureCache } from "webviz-core/src/panels/ThreeDimensionalViz/commands/utils";
@@ -127,4 +128,9 @@ const occupancyGrids = (regl: any) => {
   });
 };
 
-export default makeCommand<OccupancyGridMessage>("OccupancyGrids", occupancyGrids);
+type Props = { ...CommonCommandProps, children: OccupancyGridMessage[] };
+
+export default function OccupancyGrids(props: Props) {
+  // We can click through OccupancyGrids.
+  return <Command getChildrenForHitmap={null} {...props} reglCommand={occupancyGrids} />;
+}

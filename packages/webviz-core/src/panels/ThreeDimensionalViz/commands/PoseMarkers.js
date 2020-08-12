@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2019-present, GM Cruise LLC
+//  Copyright (c) 2019-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -15,23 +15,17 @@ type Props = {
   children: Arrow[],
 };
 
-// $FlowFixMe - flow doesn't have a definition for React.memo
-export default React.memo(function PoseMarkers({ children }: Props): Node[] {
+export default React.memo<Props>(function PoseMarkers({ children }: Props): Node[] {
   const models = [];
   const markers = [];
   children.forEach((marker, i) => {
     if (marker.settings && marker.settings.useCarModel) {
-      models.push(<CarModel key={i}>{{ pose: marker.pose, alpha: marker.settings.alpha || 1 }}</CarModel>);
+      const { pose, settings, interactionData } = marker;
+      models.push(<CarModel key={i}>{{ pose, alpha: settings.alpha || 1, interactionData }}</CarModel>);
     } else {
       const { settings } = marker;
-      if (settings && settings.color && typeof settings.color === "string") {
-        const rgbaVals = settings.color.split(",");
-        const formattedColors = rgbaVals.reduce((allColors, color) => {
-          const currentIdx = rgbaVals.indexOf(color);
-          const currentColor = { "0": "r", "1": "g", "2": "b", "3": "a" }[currentIdx];
-          return { ...allColors, [currentColor]: currentIdx === 3 ? parseFloat(color) : parseInt(color) / 255 };
-        }, marker.color);
-        marker = { ...marker, color: formattedColors };
+      if (settings && settings.color) {
+        marker = { ...marker, color: settings.color };
       }
 
       if (settings && settings.size) {
@@ -54,5 +48,6 @@ export default React.memo(function PoseMarkers({ children }: Props): Node[] {
       markers.push({ ...marker, points: [vec3ToPoint(tailPoint), vec3ToPoint(tipPoint)] });
     }
   });
+
   return models.concat(<Arrows key="arrows">{markers}</Arrows>);
 });

@@ -1,31 +1,43 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 import { TimeUtil, type Time } from "rosbag";
+import uuid from "uuid";
 
-import type { BaseMarker, StampedMessage } from "webviz-core/src/types/Messages";
+import type { Interactive } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/types";
+import type { BaseMarker } from "webviz-core/src/types/Messages";
 
 const ZERO_TIME = { sec: 0, nsec: 0 };
 
-class MessageWithLifetime {
-  message: StampedMessage;
-  receiveTime: Time;
+// Not a concrete type, just descriptive.
+type ObjectWithInteractionData = Interactive<any>;
 
-  constructor(message: StampedMessage, receiveTime: Time) {
+class MessageWithLifetime {
+  message: ObjectWithInteractionData;
+  receiveTime: Time;
+  // If lifetime is present and non-zero, the marker expires when the collector clock is greater
+  // than receiveTime + lifetime.
+  // If lifetime is zero, the marker remains until deleted by name.
+  // If absent, the marker is removed from the collector using explicit "flush" actions.
+  lifetime: ?Time;
+
+  constructor(message: ObjectWithInteractionData, receiveTime: Time, lifetime: ?Time) {
     this.message = message;
     this.receiveTime = receiveTime;
+    this.lifetime = lifetime;
   }
 
   // support in place update w/ mutation to avoid allocating
   // a MarkerWithLifetime wrapper for every marker on every tick
   // only allocate on new markers
-  update(message: StampedMessage, receiveTime: Time) {
+  update(message: ObjectWithInteractionData, receiveTime: Time, lifetime: ?Time) {
     this.message = message;
     this.receiveTime = receiveTime;
+    this.lifetime = lifetime;
   }
 
   isExpired(currentTime: Time) {
@@ -33,22 +45,23 @@ class MessageWithLifetime {
     if (!currentTime) {
       return false;
     }
-    const lifetime = this.getLifetime();
+    if (this.lifetime == null) {
+      // Do not expire markers if we can't tell what their lifetime is.
+      // They'll be flushed later if needed (see flush below)
+      return false;
+    }
+    const lifetime: Time = this.lifetime;
+
+    if (TimeUtil.areSame(lifetime, ZERO_TIME)) {
+      // Do not expire markers with infinite lifetime (lifetime == 0)
+      return false;
+    }
 
     // we use the receive time (clock) instead of the header stamp
     // to match the behavior of rviz
     const expiresAt = TimeUtil.add(this.receiveTime, lifetime);
 
     return TimeUtil.isGreaterThan(currentTime, expiresAt);
-  }
-
-  getLifetime() {
-    const marker = ((this.message: any): BaseMarker);
-    return marker.lifetime || ZERO_TIME;
-  }
-
-  hasLifetime() {
-    return !TimeUtil.areSame(this.getLifetime(), ZERO_TIME);
   }
 }
 
@@ -72,34 +85,31 @@ export default class MessageCollector {
           this.markers.delete(key);
         }
       });
+      this.flush();
     }
     this.clock = clock;
   }
 
   flush() {
-    // clear out all 0 lifetime markers
+    // clear out all null lifetime markers
     this.markers.forEach((marker, key) => {
-      if (!marker.hasLifetime()) {
+      if (marker.lifetime == null) {
         this.markers.delete(key);
       }
     });
   }
 
-  _addItem(key: string, item: any): void {
+  _addItem(key: string, item: ObjectWithInteractionData, lifetime: ?Time): void {
     const existing = this.markers.get(key);
     if (existing) {
-      existing.update(item, this.clock);
+      existing.update(item, this.clock, lifetime);
     } else {
-      this.markers.set(key, new MessageWithLifetime(item, this.clock));
+      this.markers.set(key, new MessageWithLifetime(item, this.clock, lifetime));
     }
   }
 
-  addMarker(topic: string, marker: BaseMarker) {
-    const { name } = marker;
-    if (!name) {
-      return console.error("Cannot add marker, it is missing name", marker);
-    }
-    this._addItem(name, marker);
+  addMarker(marker: Interactive<BaseMarker>, name: string) {
+    this._addItem(name, marker, marker.lifetime);
   }
 
   deleteMarker(name: string) {
@@ -113,15 +123,24 @@ export default class MessageCollector {
     this.markers.clear();
   }
 
-  addMessage(topic: string, message: any) {
-    if (message.lifetime) {
+  addNonMarker(topic: string, message: ObjectWithInteractionData, lifetime: ?Time) {
+    // Non-marker data is removed in two ways:
+    //  - Messages with lifetimes expire only at the end of their lifetime. Multiple messages on the
+    //    same topic are added and expired independently.
+    //  - Messages without lifetimes overwrite others on the same topic -- there is at most one per
+    //    topic at any time. These messages are also removed when `flush` is called.
+    //
+    // Topics are expected to have data in one of these two "modes" at a time.
+    // Non-marker messages are not expected to have names, as they have no "delete" operation.
+
+    if (lifetime != null) {
       // Assuming that all future messages will have a decay time set,
       // we need to immediately expire any pre-existing message that didn't have a decay time.
       this.markers.delete(topic);
 
-      // Note: messages with same timestamp will override each other, but this is probably very uncommon
-      const key = `${topic}/${this.clock.sec}/${this.clock.nsec}`;
-      this._addItem(key, message);
+      // Create a unique key for each new message.
+      const key = `${topic}/${uuid.v4()}`;
+      this._addItem(key, message, lifetime);
     } else {
       // if future messages will not have a decay time set,
       // we should expire any pre-existing message that have potentially longer decay times.
@@ -134,10 +153,11 @@ export default class MessageCollector {
     }
   }
 
-  getMessages(): any[] {
+  getMessages(): ObjectWithInteractionData[] {
     const result = [];
     this.markers.forEach((marker, key) => {
-      if (marker.hasLifetime() && marker.isExpired(this.clock)) {
+      // Check if the marker has a lifetime and should be deleted
+      if (marker.isExpired(this.clock)) {
         this.markers.delete(key);
       } else {
         result.push(marker.message);

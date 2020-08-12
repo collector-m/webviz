@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2019-present, GM Cruise LLC
+//  Copyright (c) 2019-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -50,8 +50,8 @@ const getConfig = (metadataDatabaseName: string) => ({
 // Note: since this runs each time we make a new database when user finally closes all opened tabs
 // the next creation of a database will clean up all the old ones.
 function tryDelete(databaseName: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    log.info("Deleting old database", databaseName);
+  return new Promise((resolve) => {
+    log.info("Trying to delete old database", databaseName);
     let resolved = false;
     const done = (success: boolean) => {
       if (resolved) {
@@ -63,7 +63,10 @@ function tryDelete(databaseName: string): Promise<boolean> {
     const deleteRequest = global.indexedDB.deleteDatabase(databaseName);
     // if we don't hear anything after 500 milliseconds assume the request is blocked
     setTimeout(() => done(false), 500);
-    deleteRequest.onsuccess = () => done(true);
+    deleteRequest.onsuccess = () => {
+      log.info(`Successfully deleted indexeddb database ${databaseName}.`);
+      done(true);
+    };
     deleteRequest.onerror = (err) => {
       log.error(`Unable to delete indexeddb database ${databaseName}`, err);
       done(false);
@@ -75,11 +78,47 @@ function tryDelete(databaseName: string): Promise<boolean> {
   });
 }
 
+async function validateStorageQuota(): Promise<void> {
+  if (process.env.NODE_ENV === "test") {
+    // navigator.storage is not available in tests.
+    return;
+  }
+
+  // $FlowFixMe - doesn't understand navigator.storage
+  if (!navigator || !navigator.storage || !navigator.storage.estimate) {
+    throw new Error("navigator.storage.estimate not supported; we only support the latest version of Google Chrome");
+  }
+  const { quota } = await navigator.storage.estimate();
+  if (!quota) {
+    throw new Error(
+      "navigator.storage.estimate().quota not supported; we only support the latest version of Google Chrome"
+    );
+  }
+  const mbAvailable = Math.round(quota / 1000 / 1000);
+  if (mbAvailable < 200) {
+    // Incognito mode limits to ~100MB.
+    throw new Error(
+      `Less than 200MB available in IndexedDB: ${mbAvailable}MB. Are you using Incognito Mode? Unfortunately, we do not support streaming Webviz in Incognito Mode.`
+    );
+  }
+  if (mbAvailable < 2000) {
+    // 2GB should be enough in most cases. Good to have a bit of a buffer.
+    throw new Error(
+      `Less than 2GB available in IndexedDB: ${mbAvailable}MB. Make sure you have plenty of free space on your disk.`
+    );
+  }
+}
+
 export async function updateMetaDatabases(
   newDatabaseName: string,
   maxDatabases: number,
   metadataDatabaseName: string
 ): Promise<void> {
+  log.info("Checking MetaDatabase", {
+    name: newDatabaseName,
+  });
+  await validateStorageQuota();
+
   const metadataDatabase = await Database.get(getConfig(metadataDatabaseName));
   try {
     // see if we're opening a database we've already opened recently
@@ -116,5 +155,6 @@ export async function doesDatabaseExist(databaseName: string, metadataDatabaseNa
   const metadataDatabase = await Database.get(getConfig(metadataDatabaseName));
   const entry = await metadataDatabase.get(metadataObjectStoreName, databaseName);
   await metadataDatabase.close();
+  log.info(`Checking if database exists returned ${!!entry} with...`, { databaseName });
   return !!entry;
 }

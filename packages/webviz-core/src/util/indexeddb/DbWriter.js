@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2019-present, GM Cruise LLC
+//  Copyright (c) 2019-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -13,7 +13,7 @@ import type { WritableStreamOptions } from "./types";
 
 const DEFAULT_BATCH_SIZE = 5000;
 
-type WriteCallback = (err: ?Error) => void;
+type WriteCallback = (err?: Error) => void;
 
 // a node.js writable stream interface for writing records to indexeddb in batch
 // this isn't meant to be created alone, but rather via database.createWriteStream()
@@ -53,13 +53,12 @@ export default class DbWriter extends Writable {
     this.batch.push(chunk);
     this.total++;
     if (this.batch.length < (this.options.batchSize || DEFAULT_BATCH_SIZE)) {
+      // can handle more data immediately
       callback();
-      // can handle more data
-      return true;
+      return;
     }
-    this.writeBatch(callback);
     // cannot handle more data until transaction completes
-    return false;
+    this.writeBatch(callback);
   }
 
   // node.js stream api implementation

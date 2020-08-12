@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,11 +11,13 @@ import React from "react";
 
 import { PLOT_DASHED_STYLE, PLOT_DOT_DASHED_STYLE } from "webviz-core/src/components/TimeBasedChart/constants";
 
-type Dataset = { label: string, color: string, borderDash: string };
+// This type describes our use, but chart.js supports many more properties if we want them:
+// https://www.chartjs.org/docs/latest/charts/line.html#dataset-properties
+type Dataset = $ReadOnly<{ label: string, color?: string, borderDash?: $ReadOnlyArray<number> }>;
 
 type Props = {
   canToggleLines?: boolean,
-  datasets: Dataset[],
+  datasets: $ReadOnlyArray<Dataset>,
   linesToHide: { [string]: boolean },
   toggleLine: (datasetId: string | typeof undefined, lineToHide: string) => void,
   datasetId?: string,
@@ -23,7 +25,7 @@ type Props = {
 
 const checkboxStyle = { height: 12, marginBottom: -2 };
 
-export default class TimeBasedChart extends React.PureComponent<Props> {
+export default class TimeBasedChartLegend extends React.PureComponent<Props> {
   _toggleLine = (label: string) => () => {
     const { datasetId, toggleLine } = this.props;
     toggleLine(datasetId, label);

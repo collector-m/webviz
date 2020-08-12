@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -10,8 +10,9 @@ import { mat4, quat, vec3 } from "gl-matrix";
 import type { Vec3 } from "gl-matrix";
 
 import Transforms, { Transform } from "webviz-core/src/panels/ThreeDimensionalViz/Transforms";
-import type { Marker, ArrowMarker, Color, Pose } from "webviz-core/src/types/Messages";
+import type { Marker, ArrowMarker, Color, MutablePose } from "webviz-core/src/types/Messages";
 import type { MarkerProvider, MarkerCollector } from "webviz-core/src/types/Scene";
+import { MARKER_MSG_TYPES } from "webviz-core/src/util/globalConstants";
 
 const originPosition = { x: 0, y: 0, z: 0 };
 const originOrientation = { x: 0, y: 0, z: 0, w: 1 };
@@ -32,7 +33,7 @@ const defaultArrowMarker = {
 
 const defaultArrowScale = { x: 0.2, y: 0.02, z: 0.02 };
 
-const getOriginPose = (): Pose => ({
+const getOriginPose = (): MutablePose => ({
   position: { ...originPosition },
   orientation: { ...originOrientation },
 });
@@ -125,7 +126,7 @@ const getAxisTextMarker = (id: string, transform: Transform, rootTransformID: st
     id: `${id}-name`,
     name: `${id}-name`,
     pose: textPose,
-    type: 9,
+    type: MARKER_MSG_TYPES.TEXT_VIEW_FACING,
     text: id,
   };
 };
@@ -134,23 +135,28 @@ const tempTranslation = [0, 0, 0];
 // So we don't create a lot of effectively unused vectors / quats.
 const throwawayQuat = { ...originOrientation };
 
-const getArrowToParentMarkers = (id: string, transform: Transform, rootTransformID: string): ArrowMarker[] => {
+// Exported for tests
+export const getArrowToParentMarkers = (id: string, transform: Transform, rootTransformID: string): ArrowMarker[] => {
   const { parent } = transform;
-  if (!parent || !parent.valid) {
+  if (!parent) {
     return [];
   }
 
+  // If the distance between the parent and child is 0, skip drawing an arrow between them.
   mat4.getTranslation(tempTranslation, transform.matrix);
   if (vec3.length(tempTranslation) <= 0) {
-    // If the parent's position is on the child, we don't need to draw an arrow between them.
     return [];
   }
 
-  const childPose: Pose = { position: { ...originPosition }, orientation: throwawayQuat };
-  transform.apply(childPose, childPose, rootTransformID);
+  let childPose = { position: { ...originPosition }, orientation: throwawayQuat };
+  childPose = transform.apply(childPose, childPose, rootTransformID);
 
-  const parentPose = { position: { ...originPosition }, orientation: throwawayQuat };
-  parent.apply(parentPose, parentPose, rootTransformID);
+  let parentPose = { position: { ...originPosition }, orientation: throwawayQuat };
+  parentPose = parent && parent.apply(parentPose, parentPose, rootTransformID);
+
+  if (!childPose || !parentPose) {
+    return [];
+  }
 
   return [
     {
@@ -171,9 +177,6 @@ const getArrowToParentMarkers = (id: string, transform: Transform, rootTransform
     },
   ];
 };
-
-const isTfExtension = (extension: string) => extension.startsWith("TF");
-const removeTfPrefix = (extension: string) => extension.slice("TF.".length);
 
 export default class TransformsBuilder implements MarkerProvider {
   transforms: Transforms;
@@ -208,8 +211,8 @@ export default class TransformsBuilder implements MarkerProvider {
     }
   }
 
-  setSelectedTransforms(extensions: string[]) {
-    this.selections = extensions.filter(isTfExtension).map(removeTfPrefix);
+  setSelectedTransforms(selections: string[]) {
+    this.selections = selections;
   }
 
   renderMarkers = (add: MarkerCollector) => {
@@ -219,7 +222,7 @@ export default class TransformsBuilder implements MarkerProvider {
     }
     for (const key of selections) {
       const transform = this.transforms.get(key);
-      if (!transform.valid) {
+      if (!transform.isValid(this.rootTransformID)) {
         // If a marker doesn't exist yet, skip rendering for now, we might get the
         // transform in a later message, so we still want to keep it in selections.
         continue;

@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -18,25 +18,43 @@ import Tooltip from "webviz-core/src/components/Tooltip";
 
 type ItemProps = {
   className?: string,
+  isHeader?: boolean,
   checked?: boolean,
   tooltip?: React.Node,
   children: React.Node,
   icon?: React.Node,
   disabled?: boolean,
-  onClick?: () => void,
+  onClick?: ?() => void,
   hasSubMenu?: boolean,
   direction?: "left" | "right",
+  dataTest?: string,
+  style?: { [attr: string]: string | number },
 };
 
 const Item = (props: ItemProps) => {
-  const { className = "", checked, children, icon, onClick, disabled, hasSubMenu, direction = "left", tooltip } = props;
+  const {
+    className = "",
+    isHeader = false,
+    checked,
+    children,
+    icon,
+    onClick,
+    disabled,
+    hasSubMenu,
+    direction = "left",
+    tooltip,
+    dataTest,
+    style,
+  } = props;
   const classes = cx(styles.item, className, {
     [styles.active]: checked && !disabled,
     [styles.disabled]: disabled,
+    disabled,
+    [styles.header]: isHeader,
   });
 
   const item = (
-    <div className={classes} onClick={disabled ? noop : onClick}>
+    <div className={classes} onClick={disabled ? noop : onClick} data-test={dataTest} style={style}>
       {hasSubMenu && direction === "left" && <ChevronLeftIcon className={styles.submenuIconLeft} />}
       {icon && (
         <span className={styles.icon}>

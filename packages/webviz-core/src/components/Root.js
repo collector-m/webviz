@@ -1,49 +1,54 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import HelpCircleIcon from "@mdi/svg/svg/help-circle.svg";
 import React from "react";
-import { hot } from "react-hot-loader";
+import { hot } from "react-hot-loader/root";
 import { connect, Provider } from "react-redux";
 
 import styles from "./Root.module.scss";
-import { changePanelLayout, importPanelLayout, savePanelConfig } from "webviz-core/src/actions/panels";
+import { redoLayoutChange, undoLayoutChange } from "webviz-core/src/actions/layoutHistory";
+import { selectAllPanelIds } from "webviz-core/src/actions/mosaic";
+import { importPanelLayout } from "webviz-core/src/actions/panels";
 import Logo from "webviz-core/src/assets/logo.svg";
 import AppMenu from "webviz-core/src/components/AppMenu";
 import ErrorBoundary from "webviz-core/src/components/ErrorBoundary";
-import ErrorDisplay from "webviz-core/src/components/ErrorDisplay";
+import Icon from "webviz-core/src/components/Icon";
+import LayoutHistoryKeyListener from "webviz-core/src/components/LayoutHistoryKeyListener";
 import LayoutMenu from "webviz-core/src/components/LayoutMenu";
+import { MessagePipelineConsumer, type MessagePipelineContext } from "webviz-core/src/components/MessagePipeline";
+import NotificationDisplay from "webviz-core/src/components/NotificationDisplay";
 import PanelLayout from "webviz-core/src/components/PanelLayout";
 import PlaybackControls from "webviz-core/src/components/PlaybackControls";
 import PlayerManager from "webviz-core/src/components/PlayerManager";
-import renderToBody from "webviz-core/src/components/renderToBody";
-import ShareJsonModal from "webviz-core/src/components/ShareJsonModal";
+import SelectableTimestamp from "webviz-core/src/components/SelectableTimestamp";
+import { TinyConnectionPicker } from "webviz-core/src/components/TinyConnectionPicker";
 import Toolbar from "webviz-core/src/components/Toolbar";
 import withDragDropContext from "webviz-core/src/components/withDragDropContext";
 import type { State } from "webviz-core/src/reducers";
-import type { PanelsState } from "webviz-core/src/reducers/panels";
-import type { Auth } from "webviz-core/src/types/Auth";
-import type { ImportPanelLayoutPayload, PanelConfig, SaveConfigPayload } from "webviz-core/src/types/panels";
-import type { Store } from "webviz-core/src/types/Store";
-import { getPanelIdForType } from "webviz-core/src/util";
+import getGlobalStore from "webviz-core/src/store/getGlobalStore";
+import inScreenshotTests from "webviz-core/src/stories/inScreenshotTests";
+import { setReactHotLoaderConfig } from "webviz-core/src/util/dev";
+import inAutomatedRunMode from "webviz-core/src/util/inAutomatedRunMode";
+import { showHelpModalOpenSource } from "webviz-core/src/util/showHelpModalOpenSource";
+
+// Only used in dev.
+setReactHotLoaderConfig();
 
 const LOGO_SIZE = 24;
 
-type AppProps = {|
-  panels: PanelsState,
-  auth: Auth,
-|};
-
 type Props = {|
-  ...AppProps,
-  // panelLayout is an opaque structure defined by react-mosaic
-  changePanelLayout: (panelLayout: any) => void,
-  savePanelConfig: (SaveConfigPayload) => void,
-  importPanelLayout: (ImportPanelLayoutPayload, boolean) => void,
+  importPanelLayout: typeof importPanelLayout,
+  redoStateCount: number,
+  undoStateCount: number,
+  redoLayoutChange: () => void,
+  undoLayoutChange: () => void,
+  selectAllPanelIds: () => void,
 |};
 class App extends React.PureComponent<Props> {
   container: ?HTMLDivElement;
@@ -55,90 +60,98 @@ class App extends React.PureComponent<Props> {
     }
 
     // Add a hook for integration tests.
-    window.setPanelLayout = (payload) => this.props.importPanelLayout(payload, false);
+    window.setPanelLayout = (payload) => this.props.importPanelLayout(payload);
   }
-
-  onPanelSelect = (panelType: string, panelConfig?: PanelConfig) => {
-    const { panels, changePanelLayout, savePanelConfig } = this.props;
-    const id = getPanelIdForType(panelType);
-    const newPanels = {
-      direction: "row",
-      first: id,
-      second: panels.layout,
-    };
-    if (panelConfig) {
-      savePanelConfig({ id, config: panelConfig });
-    }
-    changePanelLayout(newPanels);
-  };
-
-  showLayoutModal = () => {
-    const modal = renderToBody(
-      <ShareJsonModal
-        onRequestClose={() => modal.remove()}
-        value={this.props.panels}
-        onChange={this.onLayoutChange}
-        noun="layout"
-      />
-    );
-  };
-
-  onLayoutChange = (layout: any) => {
-    this.props.importPanelLayout(layout, false);
-  };
 
   render() {
     return (
       <div ref={(el) => (this.container = el)} className="app-container" tabIndex={0}>
+        <LayoutHistoryKeyListener />
         <PlayerManager>
-          <Toolbar>
-            <div className={styles.logoWrapper}>
-              <a href="/">
-                <Logo width={LOGO_SIZE} height={LOGO_SIZE} />
-              </a>
-              webviz
-            </div>
-            <div className={styles.block} style={{ marginRight: 5 }}>
-              <ErrorDisplay />
-            </div>
-            <div className={styles.block}>
-              <AppMenu onPanelSelect={this.onPanelSelect} />
-            </div>
-            <div className={styles.block}>
-              <LayoutMenu onImportSelect={this.showLayoutModal} />
-            </div>
-          </Toolbar>
-          <div className={styles.layout}>
-            <PanelLayout />
-          </div>
-          <div className={styles["playback-controls"]}>
-            <PlaybackControls />
-          </div>
+          {({ inputDescription }) => (
+            <>
+              <Toolbar>
+                <div className={styles.left}>
+                  <div className={styles.logoWrapper}>
+                    <a href="/">
+                      <Logo width={LOGO_SIZE} height={LOGO_SIZE} />
+                    </a>
+                    webviz
+                  </div>
+                  <MessagePipelineConsumer>
+                    {({ playerState, seekPlayback, pausePlayback }: MessagePipelineContext) => {
+                      if (inScreenshotTests()) {
+                        // In our open-source integration test the Rosbridge playback emits messages
+                        // at the current timestamp, so this always looks different in screenshots.
+                        return null;
+                      }
+                      if (!playerState.activeData) {
+                        return null;
+                      }
+                      const { currentTime, startTime, endTime } = playerState.activeData;
+
+                      return (
+                        <SelectableTimestamp
+                          pausePlayback={pausePlayback}
+                          seekPlayback={seekPlayback}
+                          currentTime={currentTime}
+                          startTime={startTime}
+                          endTime={endTime}
+                        />
+                      );
+                    }}
+                  </MessagePipelineConsumer>
+                </div>
+
+                <div className={styles.block} style={{ marginRight: 5 }}>
+                  {!inAutomatedRunMode() && <NotificationDisplay />}
+                </div>
+                <div className={styles.block}>
+                  <Icon tooltip="Help" small fade onClick={showHelpModalOpenSource}>
+                    <HelpCircleIcon />
+                  </Icon>
+                </div>
+                <div className={styles.block}>
+                  <AppMenu />
+                </div>
+                <div className={styles.block}>
+                  <LayoutMenu
+                    selectAllPanels={this.props.selectAllPanelIds}
+                    redoLayoutChange={this.props.redoLayoutChange}
+                    redoStateCount={this.props.redoStateCount}
+                    undoLayoutChange={this.props.undoLayoutChange}
+                    undoStateCount={this.props.undoStateCount}
+                  />
+                </div>
+                <div className={styles.block}>
+                  <TinyConnectionPicker inputDescription={inputDescription} />
+                </div>
+              </Toolbar>
+              <div className={styles.layout}>
+                <PanelLayout />
+              </div>
+              <div className={styles["playback-controls"]}>
+                <PlaybackControls />
+              </div>
+            </>
+          )}
         </PlayerManager>
       </div>
     );
   }
 }
 
-const mapStateToProps = (state: State, ownProps): AppProps => {
-  return {
-    panels: state.panels,
-    auth: state.auth,
-  };
-};
-
-const ConnectedApp = connect(
-  mapStateToProps,
-  {
-    changePanelLayout,
-    savePanelConfig,
-    importPanelLayout,
-  }
+const ConnectedApp = connect<Props, {}, _, _, _, _>(
+  ({ layoutHistory: { redoStates, undoStates } }: State) => ({
+    redoStateCount: redoStates.length,
+    undoStateCount: undoStates.length,
+  }),
+  { importPanelLayout, selectAllPanelIds, redoLayoutChange, undoLayoutChange }
 )(withDragDropContext(App));
 
-const Root = ({ store }: { store: Store }) => {
+const Root = () => {
   return (
-    <Provider store={store}>
+    <Provider store={getGlobalStore()}>
       <div className="app-container">
         <ErrorBoundary>
           <ConnectedApp />
@@ -148,5 +161,4 @@ const Root = ({ store }: { store: Store }) => {
   );
 };
 
-// $FlowFixMe
-export default hot(module)(Root);
+export default hot(Root);

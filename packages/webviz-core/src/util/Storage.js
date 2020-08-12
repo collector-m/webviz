@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -9,6 +9,7 @@
 export interface BackingStore {
   getItem(key: string): ?string;
   setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 }
 
 // small wrapper around localstorage for convenience
@@ -35,5 +36,9 @@ export default class Storage {
 
   set(key: string, value: any) {
     this.backingStore.setItem(key, JSON.stringify(value));
+  }
+
+  remove(key: string) {
+    this.backingStore.removeItem(key);
   }
 }

@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -11,7 +11,7 @@ import * as React from "react";
 import DocumentEvents from "react-document-events";
 import styled from "styled-components";
 
-import reportError from "webviz-core/src/util/reportError";
+import sendNotification from "webviz-core/src/util/sendNotification";
 
 // A low level slider component.
 //
@@ -43,9 +43,9 @@ const StyledSlider = styled.div`
   border-radius: 2px;
 `;
 
-export const StyledRange = styled.div.attrs({
-  style: ({ width = 0 }) => ({ width: `${width * 100}%` }),
-})`
+export const StyledRange = styled.div.attrs(({ width }) => ({
+  style: { width: `${(width || 0) * 100}%` },
+}))`
   background-color: rgba(255, 255, 255, 0.2);
   position: absolute;
   height: 100%;
@@ -127,6 +127,9 @@ export default class Slider extends React.Component<Props> {
     if (!draggable) {
       return;
     }
+    if (document.activeElement) {
+      document.activeElement.blur();
+    }
     e.preventDefault();
     const value = this.getValueAtMouse(e);
     onChange(value);
@@ -141,21 +144,19 @@ export default class Slider extends React.Component<Props> {
     if (max < min) {
       const msg = `Slider component given invalid range: ${min}, ${max}`;
       const err = new Error(msg);
-
-      reportError(err.message, err, "user");
+      sendNotification(err.message, err, "app", "error");
     }
 
     return (
-      <StyledSlider innerRef={(el) => (this.el = el)} onClick={this._onClick} onMouseDown={this._onMouseDown}>
+      <StyledSlider ref={(el) => (this.el = el)} onClick={this._onClick} onMouseDown={this._onMouseDown}>
         <DocumentEvents
           target={window}
           enabled={mouseDown && draggable}
           onMouseUp={this._onMouseUp}
           onMouseMove={this._onMouseMove}
         />
-        {/* include mouseup on window.top for storybook */}
-        <DocumentEvents target={window.top} enabled={mouseDown && draggable} onMouseUp={this._onMouseUp} />
-        {renderSlider(value != null ? (value - min) / (max - min) : undefined)}
+        <DocumentEvents target={window} enabled={mouseDown && draggable} onMouseUp={this._onMouseUp} />
+        {renderSlider(value != null && min !== max ? (value - min) / (max - min) : undefined)}
       </StyledSlider>
     );
   }

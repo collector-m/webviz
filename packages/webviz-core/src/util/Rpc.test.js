@@ -1,14 +1,13 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import Rpc, { type Channel, createLinkedChannels } from "./Rpc";
-
-const delay = (time) => new Promise((resolve) => setTimeout(resolve, time));
+import Rpc, { type ChannelImpl, createLinkedChannels } from "./Rpc";
+import delay from "webviz-core/shared/delay";
 
 describe("Rpc", () => {
   it("only allows setting Rpc once per channel", () => {
@@ -33,7 +32,7 @@ describe("Rpc", () => {
     const local = new Rpc(mainChannel);
     const worker = new Rpc(workerChannel);
     worker.receive("foo", async (msg) => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await delay(10);
       return { bar: msg.foo };
     });
     const result = await local.send("foo", { foo: "baz" });
@@ -44,8 +43,8 @@ describe("Rpc", () => {
     const { local: mainChannel, remote: workerChannel } = createLinkedChannels();
     const local = new Rpc(mainChannel);
     const worker = new Rpc(workerChannel);
-    worker.receive("foo", async (msg) => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    worker.receive("foo", async (_msg) => {
+      await delay(10);
       throw new Error("boom");
     });
     return local
@@ -62,7 +61,7 @@ describe("Rpc", () => {
     const { local: mainChannel, remote: workerChannel } = createLinkedChannels();
     const local = new Rpc(mainChannel);
     const worker = new Rpc(workerChannel);
-    worker.receive("foo", (msg) => {
+    worker.receive("foo", (_msg) => {
       throw new Error("boom");
     });
     return local
@@ -91,19 +90,20 @@ describe("Rpc", () => {
 
   it("can send and receive transferrables", async () => {
     const expectedTransfer = new ArrayBuffer(1);
-    const mainChannel: Channel = {
-      onmessage: undefined,
-      postMessage(data: any, transfer?: ArrayBuffer[]) {
+    const mainChannel: ChannelImpl = {
+      onmessage: null,
+      postMessage(data: any, _transfer?: ArrayBuffer[]) {
         const ev = new MessageEvent("message", { data });
         // eslint-disable-next-line no-use-before-define
         if (workerChannel.onmessage) {
           workerChannel.onmessage(ev); // eslint-disable-line no-use-before-define
         }
       },
+      terminate: () => {},
     };
 
-    const workerChannel: Channel = {
-      onmessage: undefined,
+    const workerChannel: ChannelImpl = {
+      onmessage: null,
       postMessage(data: any, transfer?: ArrayBuffer[]) {
         const ev = new MessageEvent("message", { data });
         expect(transfer).toHaveLength(1);
@@ -113,12 +113,13 @@ describe("Rpc", () => {
           mainChannel.onmessage(ev);
         }
       },
+      terminate: () => {},
     };
 
     const local = new Rpc(mainChannel);
     const worker = new Rpc(workerChannel);
     worker.receive("foo", async (msg) => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await delay(10);
       return {
         bar: msg.foo,
         [Rpc.transferrables]: [expectedTransfer],

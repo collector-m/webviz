@@ -1,14 +1,18 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import { isEqual } from "lodash";
 import momentDurationFormatSetup from "moment-duration-format";
 import moment from "moment-timezone";
 import { type Time, TimeUtil } from "rosbag";
+
+import type { Message } from "webviz-core/src/players/types";
+import { SEEK_TO_QUERY_KEY } from "webviz-core/src/util/globalConstants";
 
 type BatchTimestamp = {
   seconds: number,
@@ -17,24 +21,33 @@ type BatchTimestamp = {
 
 momentDurationFormatSetup(moment);
 
+export type TimestampMethod = "receiveTime" | "headerStamp";
+
+// Unfortunately, using %checks on this function doesn't actually allow Flow to conclude that the object is a Time.
+// Related: https://github.com/facebook/flow/issues/3614
+const timeFields = new Set(["sec", "nsec"]);
+export function isTime(obj: mixed): boolean {
+  return !!obj && typeof obj === "object" && isEqual(new Set(Object.getOwnPropertyNames(obj)), timeFields);
+}
+
 export function format(stamp: Time) {
   return `${formatDate(stamp)} ${formatTime(stamp)}`;
 }
 
-export function formatDate(stamp: Time) {
+export function formatDate(stamp: Time, timezone?: ?string) {
   if (stamp.sec < 0 || stamp.nsec < 0) {
     console.error("Times are not allowed to be negative");
     return "(invalid negative time)";
   }
-  return moment.tz(toDate(stamp), moment.tz.guess()).format("YYYY-MM-DD");
+  return moment.tz(toDate(stamp), timezone || moment.tz.guess()).format("YYYY-MM-DD");
 }
 
-export function formatTime(stamp: Time) {
+export function formatTime(stamp: Time, timezone?: ?string) {
   if (stamp.sec < 0 || stamp.nsec < 0) {
     console.error("Times are not allowed to be negative");
     return "(invalid negative time)";
   }
-  return moment.tz(toDate(stamp), moment.tz.guess()).format("h:mm:ss.SSS A z");
+  return moment.tz(toDate(stamp), timezone || moment.tz.guess()).format("h:mm:ss.SSS A z");
 }
 
 export function formatTimeRaw(stamp: Time) {
@@ -84,14 +97,38 @@ export function percentOf(start: Time, end: Time, target: Time) {
   return (toSec(targetDuration) / toSec(totalDuration)) * 100;
 }
 
-export function subtractTimes({ sec: sec1, nsec: nsec1 }: Time, { sec: sec2, nsec: nsec2 }: Time): Time {
-  return { sec: sec1 - sec2, nsec: nsec1 - nsec2 };
+function fixTime(t: Time): Time {
+  // Equivalent to fromNanoSec(toNanoSec(t)), but no chance of precision loss.
+  // nsec should be non-negative, and less than 1e9.
+  let { sec, nsec } = t;
+  while (nsec > 1e9) {
+    nsec -= 1e9;
+    sec += 1;
+  }
+  while (nsec < 0) {
+    nsec += 1e9;
+    sec -= 1;
+  }
+  return { sec, nsec };
 }
 
+export function subtractTimes({ sec: sec1, nsec: nsec1 }: Time, { sec: sec2, nsec: nsec2 }: Time): Time {
+  return fixTime({ sec: sec1 - sec2, nsec: nsec1 - nsec2 });
+}
+
+// WARNING! This will not be a precise integer for large time values due to JS only supporting
+// 53-bit integers. Best to only use this when the time represents a relatively small duration
+// (at max a few weeks).
 export function toNanoSec({ sec, nsec }: Time) {
   return sec * 1e9 + nsec;
 }
 
+// WARNING! Imprecise float; see above.
+export function toMicroSec({ sec, nsec }: Time) {
+  return (sec * 1e9 + nsec) / 1000;
+}
+
+// WARNING! Imprecise float; see above.
 export function toSec({ sec, nsec }: Time) {
   return sec + nsec * 1e-9;
 }
@@ -111,8 +148,26 @@ export function fromNanoSec(nsec: number): Time {
   return { sec: Math.trunc(nsec / 1e9), nsec: nsec % 1e9 };
 }
 
+export function toMillis(time: Time, roundUp: boolean = true): number {
+  const secondsMillis = time.sec * 1e3;
+  const nsecMillis = time.nsec / 1e6;
+  return roundUp ? secondsMillis + Math.ceil(nsecMillis) : secondsMillis + Math.floor(nsecMillis);
+}
+
 export function fromMillis(value: number): Time {
-  return fromSec(value / 1000);
+  let sec = Math.trunc(value / 1000);
+  let nsec = Math.round((value - sec * 1000) * 1e6);
+  sec += Math.trunc(nsec / 1e9);
+  nsec %= 1e9;
+  return { sec, nsec };
+}
+
+export function fromMicros(value: number): Time {
+  let sec = Math.trunc(value / 1e6);
+  let nsec = Math.round((value - sec * 1e6) * 1e3);
+  sec += Math.trunc(nsec / 1e9);
+  nsec %= 1e9;
+  return { sec, nsec };
 }
 
 export function findClosestTimestampIndex(currentTime: Time, frameTimestamps: string[] = []): number {
@@ -210,4 +265,20 @@ export function parseTimeStr(str: string): ?Time {
     return null;
   }
   return result;
+}
+
+export function getSeekToTime(): ?Time {
+  const params = new URLSearchParams(window.location.search);
+  const seekToParam = params.get(SEEK_TO_QUERY_KEY);
+  return seekToParam ? fromMillis(parseInt(seekToParam)) : null;
+}
+
+export function getTimestampForMessage(message: Message, timestampMethod?: TimestampMethod): ?Time {
+  if (timestampMethod === "headerStamp") {
+    if (message.message.header?.stamp?.sec != null && message.message.header?.stamp?.nsec != null) {
+      return message.message.header.stamp;
+    }
+    return undefined;
+  }
+  return message.receiveTime;
 }

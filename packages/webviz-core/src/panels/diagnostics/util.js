@@ -1,14 +1,22 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import { sortBy, truncate } from "lodash";
 import type { Time } from "rosbag";
 
+import { type DiagnosticsBuffer } from "webviz-core/src/panels/diagnostics/DiagnosticsHistory";
 import type { Header } from "webviz-core/src/types/Messages";
+
+// Trim the message if it's too long. We sometimes get crazy massive messages here that can
+// otherwise crash our entire UI. I looked at a bunch of messages manually and they are typically
+// way smaller than 5KB, so this is a very generous maximum. But feel free to increase it more if
+// necessary. Exported for tests.
+export const MAX_STRING_LENGTH = 5000; // 5KB
 
 export const LEVELS: { OK: 0, WARN: 1, ERROR: 2, STALE: 3 } = { OK: 0, WARN: 1, ERROR: 2, STALE: 3 };
 
@@ -19,12 +27,11 @@ export const LEVEL_NAMES = {
   [3]: "stale",
 };
 
-opaque type _DiagnosticId = string;
 interface ToString {
   toString(): string;
 }
 
-export type DiagnosticId = _DiagnosticId & ToString;
+export type DiagnosticId = string & ToString;
 
 export type Level = $Values<typeof LEVELS>;
 
@@ -45,7 +52,7 @@ export type DiagnosticInfo = {|
   displayName: string,
 |};
 
-export type DiagnosticStatusArray = {|
+export type DiagnosticStatusArrayMsg = {|
   header: Header,
   status: DiagnosticStatusMessage[],
 |};
@@ -59,19 +66,32 @@ export function getDiagnosticId(status: DiagnosticStatusMessage): DiagnosticId {
   if (hardware_id.startsWith("/")) {
     hardware_id = hardware_id.substring(1);
   }
-  return `|${hardware_id}|${status.name}|`;
+  return status.name ? `|${hardware_id}|${status.name}|` : `|${hardware_id}|`;
 }
 
 export function getDisplayName(hardwareId: string, name: string) {
   if (name.indexOf(hardwareId) === 0) {
     return name;
   }
-  return `${hardwareId}: ${name}`;
+  return name ? `${hardwareId}: ${name}` : hardwareId;
 }
 
 // ensures the diagnostic status message's name consists of both the hardware id and the name
 export function computeDiagnosticInfo(status: DiagnosticStatusMessage, stamp: Time): DiagnosticInfo {
   const displayName = getDisplayName(status.hardware_id, status.name);
+  if (status.values && status.values.some(({ value }) => value.length > MAX_STRING_LENGTH)) {
+    status = {
+      ...status,
+      values: status.values
+        ? status.values.map((kv) =>
+            kv.value.length > MAX_STRING_LENGTH
+              ? { key: kv.key, value: truncate(kv.value, { length: MAX_STRING_LENGTH }) }
+              : kv
+          )
+        : undefined,
+    };
+  }
+
   return {
     status,
     stamp,
@@ -79,3 +99,22 @@ export function computeDiagnosticInfo(status: DiagnosticStatusMessage, stamp: Ti
     displayName,
   };
 }
+
+export function getNodesByLevel(buffer: DiagnosticsBuffer, level: any): DiagnosticInfo[] {
+  return Array.from(buffer.diagnosticsByLevel[level].values());
+}
+
+export const getSortedNodes = (
+  nodes: DiagnosticInfo[],
+  hardwareIdFilter: string,
+  pinnedIds: DiagnosticId[]
+): DiagnosticInfo[] => {
+  return sortBy(
+    nodes.filter(
+      (info) =>
+        pinnedIds.indexOf(info.id) === -1 &&
+        (!hardwareIdFilter || (hardwareIdFilter && info.displayName.startsWith(hardwareIdFilter)))
+    ),
+    (info) => info.displayName.replace(/^\//, "")
+  );
+};

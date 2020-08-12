@@ -6,9 +6,9 @@
 
 // #BEGIN EXAMPLE
 import React, { useState } from "react";
-import Worldview, { Axes, GLTFScene, DEFAULT_CAMERA_STATE } from "regl-worldview";
+import Worldview, { Axes, GLTFScene } from "regl-worldview";
 
-import duckModel from "../utils/Duck.glb"; // URL pointing to a .glb file
+import duckModel from "common/fixtures/Duck.glb"; // Webpack magic: we actually import a URL pointing to a .glb file
 
 // #BEGIN EDITABLE
 function Example() {
@@ -28,12 +28,11 @@ function Example() {
   return (
     <Worldview
       defaultCameraState={{
-        ...DEFAULT_CAMERA_STATE,
         distance: 15,
         thetaOffset: (-3 * Math.PI) / 4,
       }}
-      onClick={(ev, { objectId }) => {
-        if (!duckMarkerIds.includes(objectId)) {
+      onClick={(ev, { objects }) => {
+        if (!objects[0] || !duckMarkerIds.includes(objects[0].object.id)) {
           setMsg(defaultMsg);
         }
       }}>
@@ -41,8 +40,8 @@ function Example() {
       {duckMarkers.map((duckMarker) => (
         <GLTFScene
           key={duckMarker.id}
-          onClick={(ev, { object, objectId }) => {
-            setMsg(`Clicked on the duck. objectId: ${objectId}`);
+          onClick={(ev, { objects }) => {
+            setMsg(`Clicked on the duck. objectId: ${objects[0].object.id}`);
           }}
           model={duckModel}>
           {duckMarker}

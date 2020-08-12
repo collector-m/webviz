@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2019-present, GM Cruise LLC
+//  Copyright (c) 2019-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -21,7 +21,6 @@ import VirtualLRUBuffer from "./VirtualLRUBuffer";
 //     becomes the largest range of data that can be requested.
 // - logFn (optional): a log function. Useful for logging in a particular format. Defaults to
 //     `console.log`.
-// - rangesCallback (optional): a callback that gets called any time the available ranges change.
 // - keepReconnectingCallback (optional): if set, we assume that we want to keep retrying on connection
 //     error, in which case the callback gets called with an update on whether we are currently
 //     reconnecting. This is useful when the connection is expected to be spotty, e.g. when
@@ -65,7 +64,6 @@ export default class CachedFilelike implements Filelike {
   _virtualBuffer: VirtualLRUBuffer;
   _logFn: (string) => void = (msg) => console.log(msg);
   _closed: boolean = false;
-  _rangesCallback: (Range[]) => void = () => {};
   _keepReconnectingCallback: ?(reconnecting: boolean) => void;
 
   // The current active connection, if there is one. `remainingRange.start` gets updated whenever
@@ -85,18 +83,16 @@ export default class CachedFilelike implements Filelike {
     fileReader: FileReader,
     cacheSizeInBytes?: ?number,
     logFn?: (string) => void,
-    rangesCallback?: (Range[]) => void,
     keepReconnectingCallback?: (reconnecting: boolean) => void,
   |}) {
     this._fileReader = options.fileReader;
     this._cacheSizeInBytes = options.cacheSizeInBytes || this._cacheSizeInBytes;
     this._logFn = options.logFn || this._logFn;
-    this._rangesCallback = options.rangesCallback || this._rangesCallback;
     this._keepReconnectingCallback = options.keepReconnectingCallback;
   }
 
   async open() {
-    if (this._fileSize) {
+    if (this._fileSize != null) {
       return;
     }
     const { size } = await this._fileReader.open();
@@ -120,7 +116,7 @@ export default class CachedFilelike implements Filelike {
 
   // Get the file size. Requires a call to `open()` or `read()` first.
   size() {
-    if (!this._fileSize) {
+    if (this._fileSize == null) {
       throw new Error("CachedFilelike has not been opened");
     }
     return this._fileSize;
@@ -128,10 +124,15 @@ export default class CachedFilelike implements Filelike {
 
   // Read a certain byte range, and get back a `Buffer` in `callback`.
   read(offset: number, length: number, callback: Callback<Buffer>) {
+    if (length === 0) {
+      callback(null, Buffer.allocUnsafe(0));
+      return;
+    }
+
     const range = { start: offset, end: offset + length };
     this._logFn(`Requested ${rangeToString(range)}`);
 
-    if (offset < 0 || range.end > this._fileSize || length <= 0) {
+    if (offset < 0 || range.end > this._fileSize || length < 0) {
       throw new Error("CachedFilelike#read invalid input");
     }
     if (length > this._cacheSizeInBytes) {
@@ -183,8 +184,6 @@ export default class CachedFilelike implements Filelike {
     if (newConnection) {
       this._setConnection(newConnection);
     }
-
-    this._rangesCallback(this._virtualBuffer.getRangesWithData());
   }
 
   // Replace the current connection with a new one, spanning a certain range.

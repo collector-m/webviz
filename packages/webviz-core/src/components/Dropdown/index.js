@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -19,7 +19,7 @@ import Tooltip from "webviz-core/src/components/Tooltip";
 type Props = {|
   children?: React.Node,
   value?: any,
-  text?: string,
+  text?: React.Node,
   position: "above" | "below" | "left" | "right",
   disabled?: boolean,
   closeOnChange?: boolean,
@@ -28,6 +28,8 @@ type Props = {|
   flatEdges: boolean,
   tooltip?: string,
   dataTest?: string,
+  noPortal?: boolean,
+  btnStyle?: StyleObj,
 |};
 
 type State = {
@@ -89,14 +91,18 @@ export default class Dropdown extends React.Component<Props, State> {
     }
     const { text, value, disabled, tooltip } = this.props;
     const button = (
-      <button className={cx(styles.button, { disabled })} data-test={this.props.dataTest}>
+      <button
+        className={cx(styles.button, { disabled })}
+        style={this.props.btnStyle || {}}
+        data-test={this.props.dataTest}>
         <span className={styles.title}>{text || value}</span>
         <Icon style={{ marginLeft: 4 }}>
           <MenuDownIcon style={{ width: 14, height: 14, opacity: 0.5 }} />
         </Icon>
       </button>
     );
-    if (tooltip) {
+    if (tooltip && !this.state.isOpen) {
+      // The tooltip often occludes the first item of the open menu.
       return <Tooltip contents={tooltip}>{button}</Tooltip>;
     }
     return button;
@@ -112,7 +118,13 @@ export default class Dropdown extends React.Component<Props, State> {
       borderBottomRightRadius: flatEdges && position === "above" ? "0" : undefined,
     };
     return (
-      <ChildToggle style={{ maxWidth: "100%" }} position={position} isOpen={isOpen} onToggle={this.toggle}>
+      <ChildToggle
+        style={{ maxWidth: "100%", zIndex: 0 }}
+        position={position}
+        isOpen={isOpen}
+        onToggle={this.toggle}
+        dataTest={this.props.dataTest}
+        noPortal={this.props.noPortal}>
         {this.renderButton()}
         <Menu style={style}>{this.renderChildren()}</Menu>
       </ChildToggle>

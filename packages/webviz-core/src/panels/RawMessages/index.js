@@ -1,432 +1,467 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
-
-import ChartBubbleIcon from "@mdi/svg/svg/chart-bubble.svg";
-import ChartLineVariantIcon from "@mdi/svg/svg/chart-line-variant.svg";
-import ClipboardOutlineIcon from "@mdi/svg/svg/clipboard-outline.svg";
+import CheckboxBlankOutlineIcon from "@mdi/svg/svg/checkbox-blank-outline.svg";
+import CheckboxMarkedIcon from "@mdi/svg/svg/checkbox-marked.svg";
 import ConsoleLineIcon from "@mdi/svg/svg/console-line.svg";
-import TargetIcon from "@mdi/svg/svg/target.svg";
+import PlusMinusIcon from "@mdi/svg/svg/plus-minus.svg";
 import LessIcon from "@mdi/svg/svg/unfold-less-horizontal.svg";
 import MoreIcon from "@mdi/svg/svg/unfold-more-horizontal.svg";
-import { cloneDeepWith, first, last, uniq } from "lodash";
-import * as React from "react";
+// eslint-disable-next-line no-restricted-imports
+import { first, isEqual, get, last } from "lodash";
+import React, { useState, useCallback, useMemo } from "react";
+import { hot } from "react-hot-loader/root";
 import ReactHoverObserver from "react-hover-observer";
 import Tree from "react-json-tree";
-import styled from "styled-components";
 
+import { HighlightedValue, SDiffSpan } from "./Diff";
 import { type ValueAction, getValueActionForValue, getStructureItemForPath } from "./getValueActionForValue";
 import helpContent from "./index.help.md";
 import styles from "./index.module.scss";
+import Metadata from "./Metadata";
+import RawMessagesIcons from "./RawMessagesIcons";
+import { DATA_ARRAY_PREVIEW_LIMIT, getItemString, getItemStringForDiff } from "./utils";
+import Dropdown from "webviz-core/src/components/Dropdown";
 import EmptyState from "webviz-core/src/components/EmptyState";
 import Flex from "webviz-core/src/components/Flex";
 import Icon from "webviz-core/src/components/Icon";
-import MessageHistory, {
-  type MessageHistoryData,
-  type MessageHistoryMetadata,
-  type MessageHistoryQueriedDatum,
-  isTypicalFilterName,
-} from "webviz-core/src/components/MessageHistory";
+import type { RosPath, MessagePathStructureItem } from "webviz-core/src/components/MessagePathSyntax/constants";
+import MessagePathInput from "webviz-core/src/components/MessagePathSyntax/MessagePathInput";
+import {
+  messagePathStructures,
+  traverseStructure,
+} from "webviz-core/src/components/MessagePathSyntax/messagePathsForDatatype";
+import parseRosPath from "webviz-core/src/components/MessagePathSyntax/parseRosPath";
+import {
+  useCachedGetMessagePathDataItems,
+  type MessagePathDataItem,
+} from "webviz-core/src/components/MessagePathSyntax/useCachedGetMessagePathDataItems";
+import { useLatestMessageDataItem } from "webviz-core/src/components/MessagePathSyntax/useLatestMessageDataItem";
 import Panel from "webviz-core/src/components/Panel";
 import PanelToolbar from "webviz-core/src/components/PanelToolbar";
-import { getGlobalHooks } from "webviz-core/src/loadWebviz";
-import Plot, { type PlotConfig, plotableRosTypes } from "webviz-core/src/panels/Plot";
-import { enumValuesByDatatypeAndField } from "webviz-core/src/selectors";
-import colors from "webviz-core/src/styles/colors.module.scss";
+import Tooltip from "webviz-core/src/components/Tooltip";
+import { useDataSourceInfo, useMessagesByTopic } from "webviz-core/src/PanelAPI";
+import getDiff, { diffLabels, diffLabelsByLabelText } from "webviz-core/src/panels/RawMessages/getDiff";
+import type { Topic } from "webviz-core/src/players/types";
 import type { PanelConfig } from "webviz-core/src/types/panels";
-import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
-import clipboard from "webviz-core/src/util/clipboard";
-import { format, formatDuration } from "webviz-core/src/util/time";
+import { jsonTreeTheme } from "webviz-core/src/util/globalConstants";
+import { enumValuesByDatatypeAndField } from "webviz-core/src/util/selectors";
 
-const DURATION_20_YEARS_SEC = 20 * 365 * 24 * 60 * 60;
-const DATA_ARRAY_PREVIEW_LIMIT = 20;
-
-const SMetadata = styled.div`
-  margin-top: 4px;
-  font-size: 11px;
-  color: #aaa;
-`;
-
-function getItemString(type, data, itemType, itemString) {
-  const keys = Object.keys(data);
-  if (keys.length === 2) {
-    const { sec, nsec } = data;
-    if (sec != null && nsec != null) {
-      // Values "too small" to be absolute epoch-based times are probably relative durations.
-      if (sec < DURATION_20_YEARS_SEC) {
-        return formatDuration(data);
-      }
-      return <span>{format(data)}</span>;
-    }
-  }
-
-  // for vectors/points display length
-  if (keys.length === 2) {
-    const { x, y } = data;
-    if (x != null && y != null) {
-      const length = Math.sqrt(x * x + y * y);
-      return <span> norm = {length.toFixed(2)} </span>;
-    }
-  }
-
-  if (keys.length === 3) {
-    const { x, y, z } = data;
-    if (x != null && y != null && z != null) {
-      const length = Math.sqrt(x * x + y * y + z * z);
-      return <span> norm = {length.toFixed(2)} </span>;
-    }
-  }
-
-  // Surface typically-used keys directly in the object summary so the user doesn't have to expand it.
-  const filterKeys = keys.filter(isTypicalFilterName);
-  if (filterKeys.length > 0) {
-    itemString = filterKeys.map((key) => `${key}: ${data[key]}`).join(", ");
-  }
-  return (
-    <span>
-      {itemType} {itemString}
-    </span>
-  );
-}
-
-const ROS_COMMON_MSGS = new Set([
-  "actionlib_msgs",
-  "diagnostic_msgs",
-  "geometry_msgs",
-  "nav_msgs",
-  "sensor_msgs",
-  "shape_msgs",
-  "std_msgs",
-  "stereo_msgs",
-  "trajectory_msgs",
-  "visualization_msgs",
-]);
-
-function getMessageDocumentationLink(datatype: string): ?string {
-  const parts = datatype.split("/");
-  const pkg = first(parts);
-  const filename = last(parts);
-  if (ROS_COMMON_MSGS.has(pkg)) {
-    return `http://docs.ros.org/api/${pkg}/html/msg/${filename}.html`;
-  }
-  return getGlobalHooks()
-    .perPanelHooks()
-    .RawMessages.docLinkFunction(filename);
-}
-
-type Config = {|
-  topicName: string,
+export const PREV_MSG_METHOD = "previous message";
+export type RawMessagesConfig = {|
+  topicPath: string,
+  diffMethod: "custom" | "previous message",
+  diffTopicPath: string,
+  diffEnabled: boolean,
+  showFullMessageForDiff: boolean,
 |};
 
 type Props = {
-  config: Config,
-  saveConfig: ($Shape<Config>) => void,
+  config: RawMessagesConfig,
+  saveConfig: ($Shape<RawMessagesConfig>) => void,
   openSiblingPanel: (string, cb: (PanelConfig) => PanelConfig) => void,
-  datatypes: RosDatatypes,
 };
 
-type State = {|
+const isSingleElemArray = (obj) => Array.isArray(obj) && obj.filter((a) => a != null).length === 1;
+const dataWithoutWrappingArray = (data) => {
+  return isSingleElemArray(data) && typeof data[0] === "object" ? data[0] : data;
+};
+
+function RawMessages(props: Props) {
+  const { config, saveConfig, openSiblingPanel } = props;
+  const { topicPath, diffMethod, diffTopicPath, diffEnabled, showFullMessageForDiff } = config;
+  const { topics, datatypes } = useDataSourceInfo();
+
+  const topicRosPath: ?RosPath = useMemo(() => parseRosPath(topicPath), [topicPath]);
+  const topic: ?Topic = useMemo(() => topicRosPath && topics.find(({ name }) => name === topicRosPath.topicName), [
+    topicRosPath,
+    topics,
+  ]);
+  const rootStructureItem: ?MessagePathStructureItem = useMemo(
+    () => {
+      if (!topic || !topicRosPath) {
+        return;
+      }
+      return traverseStructure(messagePathStructures(datatypes)[topic.datatype], topicRosPath.messagePath)
+        .structureItem;
+    },
+    [datatypes, topic, topicRosPath]
+  );
+
   // When expandAll is unset, we'll use expandedFields to get expanded info
-  expandAll: ?boolean,
-  expandedFields: Set<string>,
-|};
+  const [expandAll, setExpandAll] = useState(false);
+  const [expandedFields, setExpandedFields] = useState(() => new Set());
 
-class RawMessages extends React.PureComponent<Props, State> {
-  static defaultConfig = { topicName: "" };
-  static panelType = "RawMessages";
+  const topicName = topicRosPath?.topicName || "";
+  const consecutiveMsgs = useMessagesByTopic({ topics: [topicName], historySize: 2 })[topicName];
+  const cachedGetMessagePathDataItems = useCachedGetMessagePathDataItems([topicPath]);
+  const prevTickMsg = consecutiveMsgs[consecutiveMsgs.length - 2];
+  const [prevTickObj, currTickObj] = [
+    prevTickMsg && { message: prevTickMsg, queriedData: cachedGetMessagePathDataItems(topicPath, prevTickMsg) || [] },
+    useLatestMessageDataItem(topicPath),
+  ];
+  const diffTopicObj = useLatestMessageDataItem(diffEnabled ? diffTopicPath : "");
 
-  state = { expandAll: false, expandedFields: new Set() };
+  const inTimetickDiffMode = diffEnabled && diffMethod === PREV_MSG_METHOD;
+  const baseItem = inTimetickDiffMode ? prevTickObj : currTickObj;
+  const diffItem = inTimetickDiffMode ? currTickObj : diffTopicObj;
 
-  _onChange = (topicName: string) => {
-    this.props.saveConfig({ topicName });
-  };
+  const onTopicPathChange = useCallback(
+    (newTopicPath: string) => {
+      saveConfig({ topicPath: newTopicPath });
+    },
+    [saveConfig]
+  );
 
-  _toggleExpandAll = () => {
-    const expandAll = !this.state.expandAll;
-    this.state.expandedFields.clear();
-    this.setState({ expandAll });
-  };
+  const onDiffTopicPathChange = useCallback(
+    (newDiffTopicPath: string) => {
+      saveConfig({ diffTopicPath: newDiffTopicPath });
+    },
+    [saveConfig]
+  );
 
-  _onLabelClick = (keypath) => {
-    // Create a unique key according to the keypath / raw
-    const key = keypath.join("~");
-    if (this.state.expandedFields.has(key)) {
-      this.state.expandedFields.delete(key);
-    } else {
-      this.state.expandedFields.add(key);
-    }
-    this.setState({ expandAll: null });
-  };
+  const onToggleDiff = useCallback(
+    () => {
+      saveConfig({ diffEnabled: !diffEnabled });
+    },
+    [diffEnabled, saveConfig]
+  );
 
-  _renderIcons = (valueAction: ValueAction, basePath: string): React.Node => {
-    if (valueAction.type === "pivot") {
-      const { pivotPath } = valueAction;
-      return (
-        <Icon
-          fade
-          className={styles.icon}
-          onClick={() => this._onChange(`${basePath}${pivotPath}`)}
-          tooltip="Pivot on this value"
-          key="pivot">
-          <TargetIcon />
-        </Icon>
-      );
-    }
+  const onToggleExpandAll = useCallback(() => {
+    setExpandedFields(new Set());
+    setExpandAll((currVal) => !currVal);
+  }, []);
 
-    const { singleSlicePath, multiSlicePath, primitiveType } = valueAction;
+  const onLabelClick = useCallback(
+    (keypath: string[]) => {
+      // Create a unique key according to the keypath / raw
+      const key = keypath.join("~");
+      const expandedFieldsCopy = new Set(expandedFields);
+      if (expandedFieldsCopy.has(key)) {
+        expandedFieldsCopy.delete(key);
+        setExpandedFields(expandedFieldsCopy);
+      } else {
+        expandedFieldsCopy.add(key);
+        setExpandedFields(expandedFieldsCopy);
+      }
+      setExpandAll(null);
+    },
+    [expandedFields]
+  );
 
-    return (
-      <span>
-        {plotableRosTypes.includes(primitiveType) && (
-          <Icon
-            fade
-            className={styles.icon}
-            onClick={() =>
-              this.props.openSiblingPanel(
-                // $FlowFixMe: https://stackoverflow.com/questions/52508434/adding-static-variable-to-union-of-class-types
-                Plot.panelType,
-                (config: PlotConfig) =>
-                  ({
-                    ...config,
-                    paths: uniq(
-                      config.paths.concat([
-                        { value: `${basePath}${singleSlicePath}`, enabled: true, timestampMethod: "receiveTime" },
-                      ])
-                    ),
-                  }: PlotConfig)
-              )
-            }
-            tooltip="Line chart">
-            <ChartLineVariantIcon />
-          </Icon>
-        )}
-        {plotableRosTypes.includes(primitiveType) && multiSlicePath !== singleSlicePath && (
-          <Icon
-            fade
-            className={styles.icon}
-            onClick={() =>
-              this.props.openSiblingPanel(
-                // $FlowFixMe: https://stackoverflow.com/questions/52508434/adding-static-variable-to-union-of-class-types
-                Plot.panelType,
-                (config: PlotConfig) =>
-                  ({
-                    ...config,
-                    paths: uniq(
-                      config.paths.concat([
-                        { value: `${basePath}${multiSlicePath}`, enabled: true, timestampMethod: "receiveTime" },
-                      ])
-                    ),
-                  }: PlotConfig)
-              )
-            }
-            tooltip="Scatter plot">
-            <ChartBubbleIcon />
-          </Icon>
-        )}
-      </span>
-    );
-  };
+  const valueRenderer = useCallback(
+    (
+      structureItem: ?MessagePathStructureItem,
+      data: mixed[],
+      queriedData: MessagePathDataItem[],
+      label: string,
+      itemValue: mixed,
+      ...keyPath: (number | string)[]
+    ) => (
+      <ReactHoverObserver className={styles.iconWrapper}>
+        {({ isHovering }) => {
+          // $FlowFixMe: We make sure to always pass in a number at the end, but that's hard to express in Flow.
+          const lastKeyPath: number = last(keyPath);
+          let valueAction: ?ValueAction;
+          if (isHovering && structureItem) {
+            valueAction = getValueActionForValue(data[lastKeyPath], structureItem, keyPath.slice(0, -1).reverse());
+          }
 
-  _valueRenderer = (
-    metadata: ?MessageHistoryMetadata,
-    data: mixed[],
-    queriedData: MessageHistoryQueriedDatum[],
-    label: string,
-    itemValue: mixed,
-    ...keyPath: (number | string)[]
-  ) => (
-    <ReactHoverObserver className={styles.iconWrapper}>
-      {({ isHovering }) => {
-        // $FlowFixMe: We make sure to always pass in a number at the end, but that's hard to express in Flow.
-        const lastKeyPath: number = last(keyPath);
-        let valueAction: ?ValueAction;
-        if (isHovering && metadata) {
-          valueAction = getValueActionForValue(
-            data[lastKeyPath],
-            metadata.structureItem,
-            keyPath.slice(0, -1).reverse()
-          );
-        }
-
-        let constantName: ?string;
-        if (metadata) {
-          const structureItem = getStructureItemForPath(
-            metadata.structureItem,
-            keyPath
-              .slice(0, -1)
-              .reverse()
-              .join(",")
-          );
-          const { datatypes } = this.props;
+          let constantName: ?string;
           if (structureItem) {
-            const field = keyPath[0];
-            if (typeof field === "string") {
-              const enumMapping = enumValuesByDatatypeAndField(datatypes);
-              const datatype = structureItem.datatype;
-              if (enumMapping[datatype] && enumMapping[datatype][field] && enumMapping[datatype][field][itemValue]) {
-                constantName = enumMapping[datatype][field][itemValue];
+            const childStructureItem = getStructureItemForPath(
+              structureItem,
+              keyPath
+                .slice(0, -1)
+                .reverse()
+                .join(",")
+            );
+            if (childStructureItem) {
+              const field = keyPath[0];
+              if (typeof field === "string") {
+                const enumMapping = enumValuesByDatatypeAndField(datatypes);
+                const datatype = childStructureItem.datatype;
+                if (enumMapping[datatype] && enumMapping[datatype][field] && enumMapping[datatype][field][itemValue]) {
+                  constantName = enumMapping[datatype][field][itemValue];
+                }
               }
             }
           }
-        }
-        const basePath: string = queriedData[lastKeyPath].path;
-        let itemLabel = label;
-        // output preview for the first x items if the data is in binary format
-        // sample output: Int8Array(331776) [-4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, ...]
-        let smallNumberArrayStr = "";
-        if (ArrayBuffer.isView(itemValue)) {
-          // $FlowFixMe flow doesn't know itemValue is an array
-          smallNumberArrayStr = `(${itemValue.length}) [${itemValue.slice(0, DATA_ARRAY_PREVIEW_LIMIT).join(", ")}${
+          const basePath: string = queriedData[lastKeyPath].path;
+          let itemLabel = label;
+          // output preview for the first x items if the data is in binary format
+          // sample output: Int8Array(331776) [-4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, ...]
+          let smallNumberArrayStr = "";
+          if (ArrayBuffer.isView(itemValue)) {
+            // $FlowFixMe flow doesn't know itemValue is an array
+            smallNumberArrayStr = `(${itemValue.length}) [${itemValue.slice(0, DATA_ARRAY_PREVIEW_LIMIT).join(", ")}${
+              // $FlowFixMe
+              itemValue.length >= DATA_ARRAY_PREVIEW_LIMIT ? ", ..." : ""
+            }] `;
             // $FlowFixMe
-            itemValue.length >= DATA_ARRAY_PREVIEW_LIMIT ? ", ..." : ""
-          }] `;
-          // $FlowFixMe
-          itemLabel = itemValue.constructor.name;
-        }
-        if (constantName) {
-          itemLabel = `${itemLabel} (${constantName})`;
-        }
-        return (
-          <span>
-            {itemLabel}
-            {smallNumberArrayStr && (
-              <>
-                {smallNumberArrayStr}
-                <Icon
-                  fade
-                  className={styles.icon}
-                  onClick={() => console.log(itemValue)}
-                  tooltip="Log data to browser console">
-                  <ConsoleLineIcon />
-                </Icon>
-              </>
-            )}
-            {valueAction && this._renderIcons(valueAction, basePath)}
-          </span>
-        );
-      }}
-    </ReactHoverObserver>
-  );
-
-  _renderTopic = () => {
-    const { topicName } = this.props.config;
-    const { expandAll, expandedFields } = this.state;
-
-    let shouldExpandNode;
-
-    if (expandAll !== null) {
-      shouldExpandNode = () => expandAll;
-    } else {
-      shouldExpandNode = (keypath, data, level) => {
-        return expandedFields.has(keypath.join("~"));
-      };
-    }
-
-    if (!topicName) {
-      return <EmptyState>No topic selected</EmptyState>;
-    }
-
-    return (
-      <MessageHistory ignoreMissing paths={[topicName]} historySize={1}>
-        {({ itemsByPath, metadataByPath }: MessageHistoryData) => {
-          const item = itemsByPath[topicName][0];
-          const metadata = metadataByPath[topicName];
-
-          if (!item) {
-            return <EmptyState>Waiting for next message</EmptyState>;
+            itemLabel = itemValue.constructor.name;
           }
-
-          let data = item.queriedData.map(({ value }) => (value: any));
-
-          const hideWrappingArray = item.queriedData.length === 1 && typeof data[0] === "object";
-          if (hideWrappingArray) {
-            data = data[0];
+          if (constantName) {
+            itemLabel = `${itemLabel} (${constantName})`;
           }
-
-          const link = getMessageDocumentationLink(item.message.datatype);
-          const isSingleElemArray = Array.isArray(data) && data.length === 1 && typeof data[0] !== "object";
-          const shouldDisplaySingleVal = typeof data !== "object" || isSingleElemArray;
-          const singleVal = isSingleElemArray ? data[0] : data;
           return (
-            <Flex col clip scroll className={styles.container}>
-              <SMetadata>
-                <span
-                  onClick={(e: SyntheticMouseEvent<HTMLSpanElement>) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-
-                    const dataWithoutLargeArrays = cloneDeepWith(data, (value) => {
-                      if (typeof value === "object" && value.buffer) {
-                        return "<buffer>";
-                      }
-                    });
-                    clipboard.copy(JSON.stringify(dataWithoutLargeArrays, null, 2) || "");
-                  }}>
-                  <Icon>
-                    <ClipboardOutlineIcon style={{ verticalAlign: "middle" }} />
+            <span>
+              <HighlightedValue itemLabel={itemLabel} />
+              {smallNumberArrayStr && (
+                <>
+                  {smallNumberArrayStr}
+                  <Icon
+                    fade
+                    className={styles.icon}
+                    onClick={() => console.log(itemValue)}
+                    tooltip="Log data to browser console">
+                    <ConsoleLineIcon />
                   </Icon>
-                </span>{" "}
-                {link ? (
-                  <a style={{ color: "inherit" }} target="_blank" rel="noopener noreferrer" href={link}>
-                    {item.message.datatype}
-                  </a>
-                ) : (
-                  item.message.datatype
-                )}
-                {item.message.receiveTime && ` received at ${format(item.message.receiveTime)}`}
-              </SMetadata>
-              {data !== undefined &&
-                (shouldDisplaySingleVal ? (
-                  <div className={styles.singleVal}>{String(singleVal)}</div>
-                ) : (
-                  <Tree
-                    labelRenderer={(raw) => (
-                      <span style={{ padding: "0 4px" }} onClick={() => this._onLabelClick(raw)}>
-                        {first(raw)}
-                      </span>
-                    )}
-                    shouldExpandNode={shouldExpandNode}
-                    hideRoot
-                    invertTheme={false}
-                    getItemString={getItemString}
-                    valueRenderer={(...args) => {
-                      if (hideWrappingArray) {
-                        // When the wrapping array is hidden, put it back here.
-                        return this._valueRenderer(metadata, [data], item.queriedData, ...args, 0);
-                      }
-                      return this._valueRenderer(metadata, data, item.queriedData, ...args);
-                    }}
-                    theme={{ base00: colors.panelBackground, tree: { margin: 0 } }}
-                    data={data}
+                </>
+              )}
+              <span className={styles.iconBox}>
+                {valueAction && (
+                  <RawMessagesIcons
+                    valueAction={valueAction}
+                    basePath={basePath}
+                    onTopicPathChange={onTopicPathChange}
+                    openSiblingPanel={openSiblingPanel}
                   />
-                ))}
-            </Flex>
+                )}
+              </span>
+            </span>
           );
         }}
-      </MessageHistory>
-    );
-  };
+      </ReactHoverObserver>
+    ),
+    [datatypes, onTopicPathChange, openSiblingPanel]
+  );
 
-  render() {
-    const { topicName } = this.props.config;
-    const { expandAll } = this.state;
+  const renderSingleTopicOrDiffOutput = useCallback(
+    () => {
+      let shouldExpandNode;
+      if (expandAll !== null) {
+        shouldExpandNode = () => expandAll;
+      } else {
+        shouldExpandNode = (keypath) => {
+          return expandedFields.has(keypath.join("~"));
+        };
+      }
 
-    return (
-      <Flex col clip style={{ position: "relative" }}>
-        <PanelToolbar helpContent={helpContent}>
-          <Icon tooltip={expandAll ? "Collapse all" : "Expand all"} medium fade onClick={this._toggleExpandAll}>
-            {expandAll ? <LessIcon /> : <MoreIcon />}
-          </Icon>
-          <MessageHistory.Input path={topicName} onChange={this._onChange} inputStyle={{ height: "100%" }} />
-        </PanelToolbar>
-        {this._renderTopic()}
-      </Flex>
-    );
-  }
+      if (!topicPath) {
+        return <EmptyState>No topic selected</EmptyState>;
+      }
+      if (diffEnabled && diffMethod === "custom" && (!baseItem || !diffItem)) {
+        return <EmptyState>{`Waiting to diff next messages from "${topicPath}" and "${diffTopicPath}"`}</EmptyState>;
+      }
+      if (!baseItem) {
+        return <EmptyState>Waiting for next message</EmptyState>;
+      }
+
+      const data = dataWithoutWrappingArray(baseItem.queriedData.map(({ value }) => (value: any)));
+      const hideWrappingArray = baseItem.queriedData.length === 1 && typeof baseItem.queriedData[0].value === "object";
+      const shouldDisplaySingleVal =
+        (data !== undefined && typeof data !== "object") ||
+        (isSingleElemArray(data) && data[0] !== undefined && typeof data[0] !== "object");
+      const singleVal = isSingleElemArray(data) ? data[0] : data;
+
+      const diffData = diffItem && dataWithoutWrappingArray(diffItem.queriedData.map(({ value }) => (value: any)));
+      const diff = diffEnabled && getDiff(data, diffData, null, showFullMessageForDiff);
+      const diffLabelTexts = Object.keys(diffLabels).map((key) => diffLabels[key].labelText);
+
+      const CheckboxComponent = showFullMessageForDiff ? CheckboxMarkedIcon : CheckboxBlankOutlineIcon;
+      return (
+        <Flex col clip scroll className={styles.container}>
+          <Metadata
+            data={data}
+            diffData={diffData}
+            diff={diff}
+            datatype={topic?.datatype}
+            message={baseItem.message}
+            diffMessage={diffItem?.message}
+          />
+          {shouldDisplaySingleVal ? (
+            <div className={styles.singleVal}>{String(singleVal)}</div>
+          ) : diffEnabled && isEqual({}, diff) ? (
+            <EmptyState>No difference found</EmptyState>
+          ) : (
+            <>
+              {diffEnabled && (
+                <div
+                  style={{ cursor: "pointer", fontSize: "11px" }}
+                  onClick={() => saveConfig({ showFullMessageForDiff: !showFullMessageForDiff })}>
+                  <Icon style={{ verticalAlign: "middle" }}>
+                    <CheckboxComponent />
+                  </Icon>{" "}
+                  Show full msg
+                </div>
+              )}
+              <Tree
+                labelRenderer={(raw) => <SDiffSpan onClick={() => onLabelClick(raw)}>{first(raw)}</SDiffSpan>}
+                shouldExpandNode={shouldExpandNode}
+                hideRoot
+                invertTheme={false}
+                getItemString={diffEnabled ? getItemStringForDiff : getItemString}
+                valueRenderer={(...args) => {
+                  if (diffEnabled) {
+                    return valueRenderer(null, diff, diff, ...args);
+                  }
+                  if (hideWrappingArray) {
+                    // When the wrapping array is hidden, put it back here.
+                    return valueRenderer(rootStructureItem, [data], baseItem.queriedData, ...args, 0);
+                  }
+                  return valueRenderer(rootStructureItem, data, baseItem.queriedData, ...args);
+                }}
+                postprocessValue={(val: mixed) => {
+                  if (
+                    val != null &&
+                    typeof val === "object" &&
+                    Object.keys(val).length === 1 &&
+                    diffLabelTexts.includes(Object.keys(val)[0])
+                  ) {
+                    if (Object.keys(val)[0] !== diffLabels.ID.labelText) {
+                      return val[Object.keys(val)[0]];
+                    }
+                  }
+                  return val;
+                }}
+                theme={{
+                  ...jsonTreeTheme,
+                  tree: { margin: 0 },
+                  nestedNode: ({ style }, keyPath) => {
+                    const baseStyle = {
+                      ...style,
+                      padding: "2px 0 2px 5px",
+                      marginTop: 2,
+                      textDecoration: "inherit",
+                    };
+                    if (!diffEnabled) {
+                      return { style: baseStyle };
+                    }
+                    let backgroundColor;
+                    let textDecoration;
+                    if (diffLabelsByLabelText[keyPath[0]]) {
+                      backgroundColor = diffLabelsByLabelText[keyPath[0]].backgroundColor;
+                      textDecoration = keyPath[0] === diffLabels.DELETED.labelText ? "line-through" : "none";
+                    }
+                    const nestedObj = get(diff, keyPath.slice().reverse(), {});
+                    const nestedObjKey = Object.keys(nestedObj)[0];
+                    if (diffLabelsByLabelText[nestedObjKey]) {
+                      backgroundColor = diffLabelsByLabelText[nestedObjKey].backgroundColor;
+                      textDecoration = nestedObjKey === diffLabels.DELETED.labelText ? "line-through" : "none";
+                    }
+                    return {
+                      style: { ...baseStyle, backgroundColor, textDecoration: textDecoration || "inherit" },
+                    };
+                  },
+                  nestedNodeLabel: ({ style }) => ({
+                    style: { ...style, textDecoration: "inherit" },
+                  }),
+                  nestedNodeChildren: ({ style }) => ({
+                    style: { ...style, textDecoration: "inherit" },
+                  }),
+                  value: ({ style }, nodeType, keyPath) => {
+                    const baseStyle = { ...style, textDecoration: "inherit" };
+                    if (!diffEnabled) {
+                      return { style: baseStyle };
+                    }
+                    let backgroundColor;
+                    let textDecoration;
+                    const nestedObj = get(diff, keyPath.slice().reverse(), {});
+                    const nestedObjKey = Object.keys(nestedObj)[0];
+                    if (diffLabelsByLabelText[nestedObjKey]) {
+                      backgroundColor = diffLabelsByLabelText[nestedObjKey].backgroundColor;
+                      textDecoration = nestedObjKey === diffLabels.DELETED.labelText ? "line-through" : "none";
+                    }
+                    return {
+                      style: { ...baseStyle, backgroundColor, textDecoration: textDecoration || "inherit" },
+                    };
+                  },
+                  label: { textDecoration: "inherit" },
+                }}
+                data={diffEnabled ? diff : data}
+              />
+            </>
+          )}
+        </Flex>
+      );
+    },
+    [
+      baseItem,
+      diffEnabled,
+      diffItem,
+      diffMethod,
+      diffTopicPath,
+      expandAll,
+      expandedFields,
+      onLabelClick,
+      rootStructureItem,
+      saveConfig,
+      showFullMessageForDiff,
+      topic,
+      topicPath,
+      valueRenderer,
+    ]
+  );
+
+  return (
+    <Flex col clip style={{ position: "relative" }}>
+      <PanelToolbar helpContent={helpContent}>
+        <Icon tooltip="Toggle diff" medium fade onClick={onToggleDiff} active={diffEnabled}>
+          <PlusMinusIcon />
+        </Icon>
+        <Icon
+          tooltip={expandAll ? "Collapse all" : "Expand all"}
+          medium
+          fade
+          onClick={onToggleExpandAll}
+          style={{ position: "relative", top: 1 }}>
+          {expandAll ? <LessIcon /> : <MoreIcon />}
+        </Icon>
+        <div className={styles.topicInputs}>
+          <MessagePathInput index={0} path={topicPath} onChange={onTopicPathChange} inputStyle={{ height: "100%" }} />
+          {diffEnabled && (
+            <Flex>
+              <Tooltip contents="Diff method" placement="top">
+                <>
+                  <Dropdown
+                    value={diffMethod}
+                    onChange={(newDiffMethod) => saveConfig({ diffMethod: newDiffMethod })}
+                    noPortal>
+                    <span value={PREV_MSG_METHOD}>{PREV_MSG_METHOD}</span>
+                    <span value="custom">custom</span>
+                  </Dropdown>
+                </>
+              </Tooltip>
+              {diffMethod === "custom" ? (
+                <MessagePathInput
+                  index={1}
+                  path={diffTopicPath}
+                  onChange={onDiffTopicPathChange}
+                  inputStyle={{ height: "100%" }}
+                  prioritizedDatatype={topic?.datatype}
+                />
+              ) : null}
+            </Flex>
+          )}
+        </div>
+      </PanelToolbar>
+      {renderSingleTopicOrDiffOutput()}
+    </Flex>
+  );
 }
 
-export default Panel<Config>(RawMessages);
+RawMessages.defaultConfig = {
+  topicPath: "",
+  diffTopicPath: "",
+  diffMethod: "custom",
+  diffEnabled: false,
+  showFullMessageForDiff: false,
+};
+RawMessages.panelType = "RawMessages";
+
+export default hot(Panel<RawMessagesConfig>(RawMessages));

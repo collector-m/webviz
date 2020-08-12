@@ -1,145 +1,107 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import BorderAllIcon from "@mdi/svg/svg/border-all.svg";
 import CloseIcon from "@mdi/svg/svg/close.svg";
+import ExpandAllOutlineIcon from "@mdi/svg/svg/expand-all-outline.svg";
 import FullscreenIcon from "@mdi/svg/svg/fullscreen.svg";
 import GridLargeIcon from "@mdi/svg/svg/grid-large.svg";
+import TrashCanOutlineIcon from "@mdi/svg/svg/trash-can-outline.svg";
 import cx from "classnames";
-import { omit } from "lodash";
-import PropTypes from "prop-types";
-import * as React from "react";
+import { last, without, xor } from "lodash";
+import React, { useState, useCallback, useContext, useMemo, useRef, type ComponentType } from "react";
 import DocumentEvents from "react-document-events";
-import KeyListener from "react-key-listener";
-import { getNodeAtPath, isParent } from "react-mosaic-component";
-import { connect } from "react-redux";
+import {
+  MosaicContext,
+  type MosaicRootActions,
+  type MosaicWindowActions,
+  MosaicWindowContext,
+  getNodeAtPath,
+  getOtherBranch,
+  getPathFromNode,
+  isParent,
+  updateTree,
+} from "react-mosaic-component";
+import { useSelector, useDispatch } from "react-redux";
+import { bindActionCreators } from "redux";
 
 import styles from "./Panel.module.scss";
+import {
+  addSelectedPanelId,
+  removeSelectedPanelId,
+  setSelectedPanelIds,
+  selectAllPanelIds,
+} from "webviz-core/src/actions/mosaic";
+import {
+  savePanelConfigs,
+  saveFullPanelConfig,
+  changePanelLayout,
+  createTabPanel,
+} from "webviz-core/src/actions/panels";
 import Button from "webviz-core/src/components/Button";
-import ChildToggle from "webviz-core/src/components/ChildToggle";
-import Dropdown from "webviz-core/src/components/Dropdown";
 import ErrorBoundary from "webviz-core/src/components/ErrorBoundary";
 import Flex from "webviz-core/src/components/Flex";
-import { Item } from "webviz-core/src/components/Menu";
-import { getFilteredFormattedTopics } from "webviz-core/src/components/MessageHistory/topicPrefixUtils";
-import { MessagePipelineConsumer, type MessagePipelineContext } from "webviz-core/src/components/MessagePipeline";
+import Icon from "webviz-core/src/components/Icon";
+import KeyListener from "webviz-core/src/components/KeyListener";
 import PanelContext from "webviz-core/src/components/PanelContext";
 import MosaicDragHandle from "webviz-core/src/components/PanelToolbar/MosaicDragHandle";
-import { getGlobalHooks } from "webviz-core/src/loadWebviz";
-import PanelList, { getPanelListItemsByType } from "webviz-core/src/panels/PanelList";
-import type { State as ReduxState } from "webviz-core/src/reducers";
-import type { SaveConfigPayload, PanelConfig, SaveConfig } from "webviz-core/src/types/panels";
-import type { Topic } from "webviz-core/src/types/players";
+import * as PanelAPI from "webviz-core/src/PanelAPI";
+import PanelList, { getPanelsByType } from "webviz-core/src/panels/PanelList";
+import type { Topic } from "webviz-core/src/players/types";
+import { type TabPanelConfig } from "webviz-core/src/types/layouts";
+import type {
+  CreateTabPanelPayload,
+  EditHistoryOptions,
+  SaveConfigsPayload,
+  SaveFullConfigPayload,
+  PanelConfig,
+  SaveConfig,
+} from "webviz-core/src/types/panels";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
-import { getPanelTypeFromId } from "webviz-core/src/util";
+import { TAB_PANEL_TYPE } from "webviz-core/src/util/globalConstants";
+import {
+  getAllPanelIds,
+  getPanelIdForType,
+  getPanelTypeFromId,
+  getParentTabPanelByPanelId,
+  isTabPanel,
+  updateTabPanelLayout,
+} from "webviz-core/src/util/layout";
+import { colors } from "webviz-core/src/util/sharedStyleConstants";
 
-// Higher-order component to wrap your panel in. Gives you a `config` and a method to save a new
-// config: `saveConfig`. Typically used like this:
-//
-//   export default Panel(MyPanelComponent)
-//
-// We get the config from Redux, but in stories and tests you can pass in your own:
-//
-//   `<MyPanel config={…} />`
-//
-// The panel also gets wrapped in an error boundary and flex box.
-
-export const TOPIC_PREFIX_CONFIG_KEY = "webviz___topicPrefix";
-
-type Props<Config> = {| childId?: string, config?: Config |};
-type State = {
-  quickActionsKeyPressed: boolean,
-  fullScreen: boolean,
-  removePanelKeyPressed: boolean,
-};
-
+type Props<Config> = { childId?: string, config?: Config, saveConfig?: (Config) => void, tabId?: string };
+type ActionProps = {|
+  savePanelConfigs: (SaveConfigsPayload) => void,
+  saveFullPanelConfig: (SaveFullConfigPayload) => PanelConfig,
+  changePanelLayout: (panels: any) => void,
+  addSelectedPanelId: (panelId: string) => void,
+  removeSelectedPanelId: (panelId: string) => void,
+  setSelectedPanelIds: (panelIds: string[]) => void,
+  selectAllPanelIds: () => void,
+  createTabPanel: (CreateTabPanelPayload) => void,
+|};
 interface PanelStatics<Config> {
   panelType: string;
   defaultConfig: Config;
-  canSetTopicPrefix?: boolean;
 }
 
-const getTopicPrefixIconPrefix = (topicPrefix?: string) => {
-  return (
-    <span style={{ marginLeft: 3, marginTop: 3 }}>
-      {getGlobalHooks().perPanelHooks().Panel.topicPrefixes[topicPrefix].iconPrefix}
-    </span>
-  );
-};
+const EMPTY_CONFIG = Object.freeze({});
 
-const getTopicPrefixTooltip = (topicPrefix?: string) => {
-  return getGlobalHooks().perPanelHooks().Panel.topicPrefixes[topicPrefix].tooltipText;
-};
-
-const getTopicPrefixOptionText = (topicPrefix?: string) => {
-  return getGlobalHooks().perPanelHooks().Panel.topicPrefixes[topicPrefix].labelText;
-};
-
-const getTopicPrefixIcon = (topicPrefix?: string) => {
-  const IconComponent = getGlobalHooks().perPanelHooks().Panel.topicPrefixes[topicPrefix].icon;
-  return <IconComponent style={{ height: 14, marginLeft: -5, marginTop: 2 }} />;
-};
-
-const TopicPrefixDropdown = (props: {|
-  topicPrefix: string,
-  saveTopicPrefix: (newTopicPrefix: string) => Function,
-|}) => {
-  const { topicPrefix, saveTopicPrefix } = props;
-  return (
-    <ChildToggle.ContainsOpen>
-      {(containsOpen) => (
-        <Dropdown
-          position="above"
-          toggleComponent={
-            <div
-              data-test-topic-prefix-toggle
-              className={cx(styles.topicPrefixLabel, {
-                [styles.hasEmptyTopicPrefix]: !topicPrefix && !containsOpen,
-              })}>
-              {getTopicPrefixIconPrefix(topicPrefix)}
-              {getTopicPrefixIcon(topicPrefix)}
-            </div>
-          }>
-          <Item key="title" disabled>
-            Show topics from:
-          </Item>
-          {Object.keys(getGlobalHooks().perPanelHooks().Panel.topicPrefixes).map((prefix) => {
-            return (
-              <Item
-                key={prefix || "none"}
-                checked={topicPrefix === prefix}
-                icon={getTopicPrefixIcon(prefix)}
-                tooltip={prefix && getTopicPrefixTooltip(prefix)}
-                onClick={saveTopicPrefix(prefix)}>
-                {getTopicPrefixOptionText(prefix)}
-              </Item>
-            );
-          })}
-        </Dropdown>
-      )}
-    </ChildToggle.ContainsOpen>
-  );
-};
-
-export class MockPanelContextProvider extends React.Component<{ topicPrefix?: string, children: React.Node }> {
-  render() {
-    const { topicPrefix = "", children } = this.props;
-    return (
-      <PanelContext.Provider value={{ type: "foo", id: "bar", title: "Foo Panel", topicPrefix }}>
-        {children}
-      </PanelContext.Provider>
-    );
-  }
-}
-
+// HOC that wraps panel in an error boundary and flex box.
+// Gives panel a `config` and `saveConfig`.
+//   export default Panel(MyPanelComponent)
+//
+// `config` comes from Redux, but in stories / tests you can pass in your own:
+//   `<MyPanel config={…} />`
 export default function Panel<Config: PanelConfig>(
   PanelComponent: (
-    | React.ComponentType<{}>
-    | React.ComponentType<
+    | ComponentType<{}>
+    | ComponentType<
         $Shape<{
           config: Config,
           saveConfig: SaveConfig<Config>,
@@ -147,243 +109,392 @@ export default function Panel<Config: PanelConfig>(
           topics: Topic[],
           capabilities: string[],
           datatypes: RosDatatypes,
+          isHovered: boolean,
         }>
       >
   ) &
     PanelStatics<Config>
   // TODO(JP): Add `& PanelStatics<Config>` to the return type when we have figured out
   // https://stackoverflow.com/questions/52508434/adding-static-variable-to-union-of-class-types
-): React.ComponentType<Props<Config>> {
-  type ReduxMappedProps = {|
-    childId?: string,
-    config: Config,
-    isOnlyPanel: boolean,
-  |};
+): ComponentType<Props<Config>> {
+  function ConnectedPanel(props: Props<Config>) {
+    const { childId, config: originalConfig, saveConfig, tabId } = props;
+    const { mosaicActions }: { mosaicActions: MosaicRootActions } = useContext(MosaicContext);
+    const { mosaicWindowActions }: { mosaicWindowActions: MosaicWindowActions } = useContext(MosaicWindowContext);
 
-  type PipelineProps = {|
-    topics: Topic[],
-    datatypes: RosDatatypes,
-    capabilities: string[],
-  |};
+    const layout = useSelector(({ panels }) => panels.layout);
+    const savedProps = useSelector(({ panels }) => panels.savedProps);
+    const stableSavedProps = useRef(savedProps);
+    stableSavedProps.current = savedProps;
+    const selectedPanelIds = useSelector((state) => state.mosaic.selectedPanelIds);
+    const isSelected = selectedPanelIds.includes(childId);
+    const isFocused = selectedPanelIds.length === 1 && selectedPanelIds[0] === childId; // the current panel is the only selected panel
 
-  const defaultConfig: Config = PanelComponent.defaultConfig;
-  const canSetTopicPrefix: boolean = PanelComponent.canSetTopicPrefix || false;
+    const isOnlyPanel = useMemo(() => (tabId ? false : !isParent(layout)), [layout, tabId]);
+    const config = savedProps[childId] || originalConfig || EMPTY_CONFIG;
 
-  class UnconnectedPanel extends React.PureComponent<
-    ReduxMappedProps & PipelineProps & {| savePanelConfig: (SaveConfigPayload) => void |},
-    State
-  > {
-    static displayName = `Panel(${PanelComponent.displayName || PanelComponent.name || ""})`;
+    const { topics, datatypes, capabilities } = PanelAPI.useDataSourceInfo();
+    const dispatch = useDispatch();
+    const actions: ActionProps = useMemo(
+      () =>
+        bindActionCreators(
+          {
+            savePanelConfigs,
+            saveFullPanelConfig,
+            changePanelLayout,
+            addSelectedPanelId,
+            removeSelectedPanelId,
+            setSelectedPanelIds,
+            selectAllPanelIds,
+            createTabPanel,
+          },
+          dispatch
+        ),
+      [dispatch]
+    );
 
-    static contextTypes = {
-      mosaicActions: PropTypes.any,
-      mosaicWindowActions: PropTypes.any,
-      store: PropTypes.any,
-    };
+    const [quickActionsKeyPressed, setQuickActionsKeyPressed] = useState(false);
+    const [shiftKeyPressed, setShiftKeyPressed] = useState(false);
+    const [cmdKeyPressed, setCmdKeyPressed] = useState(false);
+    const [fullScreen, setFullScreen] = useState(false);
+    const [isHovered, setIsHovered] = useState(false);
+    const [fullScreenLocked, setFullScreenLocked] = useState(false);
 
-    state = { quickActionsKeyPressed: false, fullScreen: false, removePanelKeyPressed: false };
+    const panelsByType = useMemo(() => getPanelsByType(), []);
+    const type = PanelComponent.panelType;
+    const title = useMemo(() => panelsByType[type]?.title, [panelsByType, type]);
+    const panelComponentConfig = useMemo(() => ({ ...PanelComponent.defaultConfig, ...config }), [config]);
 
-    // Save the config, by mixing in the partial config with the current config, or if that does
-    // not exist, with the `defaultConfig`. That way we always save complete configs.
-    _saveConfig = (config: $Shape<Config>, options: { keepLayoutInUrl?: boolean } = {}) => {
-      if (config[TOPIC_PREFIX_CONFIG_KEY]) {
-        throw new Error("Panel is not allowed to set TOPIC_PREFIX_CONFIG_KEY");
-      }
-      if (this.props.childId) {
-        this.props.savePanelConfig({
-          id: this.props.childId,
-          silent: !!options.keepLayoutInUrl,
-          config: { ...defaultConfig, ...this.props.config, ...config },
-        });
-      }
-    };
-
-    // this is same as above _saveConfig, but is internal to this file / allows you to save the TOPIC_PREFIX_CONFIG_KEY
-    _saveTopicPrefix = (newTopicPrefix: string) => {
-      return () => {
-        if (this.props.childId) {
-          this.props.savePanelConfig({
-            id: this.props.childId,
-            silent: false,
-            config: { ...this.props.config, ...{ [TOPIC_PREFIX_CONFIG_KEY]: newTopicPrefix } },
+    // Mix partial config with current config or `defaultConfig`
+    const saveCompleteConfig = useCallback(
+      (configToSave: $Shape<Config>, options: ?{ keepLayoutInUrl?: boolean, historyOptions?: EditHistoryOptions }) => {
+        if (saveConfig) {
+          saveConfig(configToSave);
+        }
+        if (childId) {
+          actions.savePanelConfigs({
+            silent: !!options?.keepLayoutInUrl,
+            configs: [{ id: childId, config: configToSave, defaultConfig: PanelComponent.defaultConfig }],
+            historyOptions: options?.historyOptions,
           });
         }
-      };
-    };
+      },
+      [actions, childId, saveConfig]
+    );
 
-    // Open a panel next to the current panel, of the specified `panelType`. If such a panel already
-    // exist, we update it with the new props.
-    _openSiblingPanel = (panelType: string, siblingConfigCreator: (PanelConfig) => PanelConfig) => {
-      const siblingComponent = PanelList.getComponentForType(panelType);
-      if (!siblingComponent) {
-        return;
-      }
-      const defaultSiblingConfig = siblingComponent.defaultConfig;
+    const updatePanelConfig = useCallback(
+      (panelType: string, perPanelFunc: (PanelConfig) => PanelConfig, historyOptions?: EditHistoryOptions) => {
+        actions.saveFullPanelConfig({ panelType, perPanelFunc, historyOptions });
+      },
+      [actions]
+    );
 
-      const { mosaicActions, mosaicWindowActions, store } = this.context;
-      const panelConfigById = store.getState().panels.savedProps;
-      const ownPath = mosaicWindowActions.getPath();
+    // Open a panel next to the current panel, of the specified `panelType`.
+    // If such a panel already exists, we update it with the new props.
+    const openSiblingPanel = useCallback(
+      (panelType: string, siblingConfigCreator: (PanelConfig) => PanelConfig) => {
+        const siblingComponent = PanelList.getComponentForType(panelType);
+        if (!siblingComponent) {
+          return;
+        }
+        const siblingDefaultConfig = siblingComponent.defaultConfig;
+        const ownPath = mosaicWindowActions.getPath();
 
-      // Try to find a sibling summary panel and update it with the `siblingConfig`.
-      const siblingPathEnd = ownPath[ownPath.length - 1] === "first" ? "second" : "first";
-      const siblingPath = ownPath.slice(0, ownPath.length - 1).concat(siblingPathEnd);
-      const siblingId = getNodeAtPath(mosaicActions.getRoot(), siblingPath);
-      if (typeof siblingId === "string" && getPanelTypeFromId(siblingId) === panelType) {
-        const siblingConfig: PanelConfig = { ...defaultSiblingConfig, ...(panelConfigById[siblingId]: any) };
-        this.props.savePanelConfig({ id: siblingId, config: siblingConfigCreator(siblingConfig) });
-        return;
-      }
+        // Try to find a sibling summary panel and update it with the `siblingConfig`
+        const siblingPathEnd = last(ownPath) ? getOtherBranch(last(ownPath)) : "second";
+        const siblingPath = ownPath.slice(0, -1).concat(siblingPathEnd);
+        const siblingId = getNodeAtPath(mosaicActions.getRoot(), siblingPath);
+        if (typeof siblingId === "string" && getPanelTypeFromId(siblingId) === panelType) {
+          const siblingConfig: PanelConfig = { ...siblingDefaultConfig, ...stableSavedProps.current[siblingId] };
+          actions.savePanelConfigs({
+            configs: [
+              { id: siblingId, config: siblingConfigCreator(siblingConfig), defaultConfig: siblingDefaultConfig },
+            ],
+          });
+          return;
+        }
 
-      // Otherwise, open a new panel.
-      const newPanelPath = ownPath.concat("second");
-      mosaicWindowActions.split({ type: panelType }).then(() => {
-        const newPanelId = getNodeAtPath(mosaicActions.getRoot(), newPanelPath);
-        this.props.savePanelConfig({ id: newPanelId, config: siblingConfigCreator(defaultSiblingConfig) });
-      });
-    };
+        // Otherwise, open new panel
+        const newPanelPath = ownPath.concat("second");
+        mosaicWindowActions.split({ type: panelType }).then(() => {
+          const newPanelId = getNodeAtPath(mosaicActions.getRoot(), newPanelPath);
+          actions.savePanelConfigs({
+            configs: [
+              {
+                id: newPanelId,
+                config: siblingConfigCreator(siblingDefaultConfig),
+                defaultConfig: siblingDefaultConfig,
+              },
+            ],
+          });
+        });
+      },
+      [actions, mosaicActions, mosaicWindowActions]
+    );
 
-    _onOverlayClick = () => {
-      if (this.state.quickActionsKeyPressed) {
-        this.setState({ fullScreen: true });
-      }
-    };
+    const selectPanel = useCallback(
+      (panelId: string, toggleSelection: boolean) => {
+        const panelIdsToDeselect = [];
 
-    _closePanel = () => {
-      const { mosaicActions, mosaicWindowActions } = this.context;
-      mosaicActions.remove(mosaicWindowActions.getPath());
-    };
+        // If we selected a Tab panel, deselect its children
+        const savedConfig = savedProps[panelId];
+        if (isTabPanel(panelId) && savedConfig) {
+          const { activeTabIdx, tabs } = (savedConfig: TabPanelConfig);
+          const activeTabLayout = tabs[activeTabIdx]?.layout;
+          if (activeTabLayout) {
+            const childrenPanelIds = getAllPanelIds(activeTabLayout, savedProps);
+            panelIdsToDeselect.push(...childrenPanelIds);
+          }
+        }
 
-    _splitPanel = () => {
-      const { mosaicWindowActions } = this.context;
-      mosaicWindowActions.split({ type: PanelComponent.panelType });
-    };
+        // If we selected a child, deselect all parent Tab panels
+        const parentTabPanelByPanelId = getParentTabPanelByPanelId(savedProps);
+        let nextParentId = tabId;
+        const parentTabPanelIds = [];
+        while (nextParentId) {
+          parentTabPanelIds.push(nextParentId);
+          nextParentId = parentTabPanelByPanelId[nextParentId];
+        }
+        panelIdsToDeselect.push(...parentTabPanelIds);
 
-    _keyUpTimeout = null;
+        const nextSelectedPanelIds = toggleSelection ? xor(selectedPanelIds, [panelId]) : [panelId];
+        const nextValidSelectedPanelIds = without(nextSelectedPanelIds, ...panelIdsToDeselect);
+        actions.setSelectedPanelIds(nextValidSelectedPanelIds);
+      },
+      [actions, savedProps, selectedPanelIds, tabId]
+    );
 
-    _exitFullScreen = (e) => {
-      // When using Synergy, holding down a key leads to repeated keydown/up events, so give the
-      // keydown events a chance to cancel a pending keyup.
-      this._keyUpTimeout = setTimeout(() => {
-        this.setState({ quickActionsKeyPressed: false, fullScreen: false });
-        this._keyUpTimeout = null;
-      }, 0);
-    };
+    const onOverlayClick = useCallback(
+      (e) => {
+        if (!fullScreen && quickActionsKeyPressed) {
+          setFullScreen(true);
+          if (shiftKeyPressed) {
+            setFullScreenLocked(true);
+          }
+          return;
+        }
 
-    _keyUpHandlers = {
-      "`": this._exitFullScreen,
-    };
-
-    _keyDownHandlers = {
-      "`": (e) => {
-        if (!e.repeat || !this.state.quickActionsKeyPressed) {
-          clearTimeout(this._keyUpTimeout);
-          this.setState({ quickActionsKeyPressed: true });
+        if (childId) {
+          e.stopPropagation();
+          selectPanel(childId, e.metaKey);
         }
       },
-    };
+      [childId, fullScreen, quickActionsKeyPressed, selectPanel, shiftKeyPressed]
+    );
 
-    render() {
-      const { topics, datatypes, capabilities, childId, isOnlyPanel, config = {} } = this.props;
-      const { quickActionsKeyPressed, fullScreen } = this.state;
-      const panelListItemsByType = getPanelListItemsByType();
-      const type = PanelComponent.panelType;
-      const title = panelListItemsByType[type] && panelListItemsByType[type].title;
+    const groupPanels = useCallback(
+      () => {
+        actions.createTabPanel({
+          idToReplace: childId,
+          layout,
+          idsToRemove: selectedPanelIds,
+          singleTab: true,
+        });
+      },
+      [actions, childId, layout, selectedPanelIds]
+    );
 
-      const currentTopicPrefix = config[TOPIC_PREFIX_CONFIG_KEY] || "";
+    const createTabs = useCallback(
+      () => {
+        actions.createTabPanel({
+          idToReplace: childId,
+          layout,
+          idsToRemove: selectedPanelIds,
+          singleTab: false,
+        });
+      },
+      [actions, childId, layout, selectedPanelIds]
+    );
 
-      return (
-        // $FlowFixMe - bug prevents requiring panelType on PanelComponent: https://stackoverflow.com/q/52508434/23649
-        <PanelContext.Provider value={{ type, id: childId, title, topicPrefix: currentTopicPrefix }}>
-          {/* ensures user exits full-screen mode when leaving the window, even if key is still pressed down */}
-          <DocumentEvents target={window.top} enabled onBlur={this._exitFullScreen} />
-          <KeyListener global keyUpHandlers={this._keyUpHandlers} keyDownHandlers={this._keyDownHandlers} />
-          <Flex
-            onClick={this._onOverlayClick}
-            className={cx({
-              [styles.root]: true,
-              [styles.rootFullScreen]: fullScreen,
-            })}
-            col
-            clip>
-            {quickActionsKeyPressed && !fullScreen && (
-              <MosaicDragHandle>
-                <div className={styles.quickActionsOverlay} data-panel-overlay>
+    const { closePanel, splitPanel } = useMemo(
+      () => ({
+        closePanel: () => {
+          mosaicActions.remove(mosaicWindowActions.getPath());
+        },
+        splitPanel: () => {
+          if (tabId) {
+            const newId = getPanelIdForType(PanelComponent.panelType);
+            const activeTabLayout = savedProps[tabId].tabs[savedProps[tabId].activeTabIdx].layout;
+            const pathToPanelInTab = getPathFromNode(childId, activeTabLayout);
+            const newTabLayout = updateTree(activeTabLayout, [
+              { path: pathToPanelInTab, spec: { $set: { first: childId, second: newId, direction: "row" } } },
+            ]);
+            const newTabConfig = updateTabPanelLayout(newTabLayout, savedProps[tabId]);
+            actions.savePanelConfigs({ configs: [{ id: tabId, config: newTabConfig }, { id: newId, config }] });
+          } else {
+            mosaicWindowActions.split({ type: PanelComponent.panelType });
+          }
+        },
+      }),
+      [actions, childId, config, mosaicActions, mosaicWindowActions, savedProps, tabId]
+    );
+
+    const { onMouseEnter, onMouseLeave, onMouseMove, enterFullscreen, exitFullScreen } = useMemo(
+      () => ({
+        onMouseEnter: () => setIsHovered(true),
+        onMouseLeave: () => setIsHovered(false),
+        onMouseMove: (e) => {
+          if (e.metaKey !== cmdKeyPressed) {
+            setCmdKeyPressed(e.metaKey);
+          }
+        },
+        enterFullscreen: () => {
+          setFullScreen(true);
+          setFullScreenLocked(true);
+        },
+        exitFullScreen: () => {
+          setFullScreen(false);
+          setFullScreenLocked(false);
+        },
+      }),
+      [cmdKeyPressed]
+    );
+
+    const onReleaseQuickActionsKey = useCallback(
+      () => {
+        setQuickActionsKeyPressed(false);
+        if (fullScreen && !fullScreenLocked) {
+          exitFullScreen();
+        }
+      },
+      [exitFullScreen, fullScreen, fullScreenLocked]
+    );
+
+    const { keyUpHandlers, keyDownHandlers } = useMemo(
+      () => ({
+        keyUpHandlers: {
+          "`": () => onReleaseQuickActionsKey(),
+          "~": () => onReleaseQuickActionsKey(),
+          Shift: () => setShiftKeyPressed(false),
+          Meta: () => setCmdKeyPressed(false),
+        },
+        keyDownHandlers: {
+          a: (e) => {
+            e.preventDefault();
+            if (cmdKeyPressed) {
+              actions.selectAllPanelIds();
+            }
+          },
+          "`": () => setQuickActionsKeyPressed(true),
+          "~": () => setQuickActionsKeyPressed(true),
+          Shift: () => setShiftKeyPressed(true),
+          Escape: () => exitFullScreen(),
+          Meta: () => setCmdKeyPressed(true),
+        },
+      }),
+      [actions, cmdKeyPressed, exitFullScreen, onReleaseQuickActionsKey]
+    );
+
+    const onBlurDocument = useCallback(
+      () => {
+        exitFullScreen();
+        setCmdKeyPressed(false);
+        setShiftKeyPressed(false);
+        onReleaseQuickActionsKey();
+      },
+      [exitFullScreen, onReleaseQuickActionsKey]
+    );
+
+    const child = useMemo(
+      () => (
+        <PanelComponent
+          config={panelComponentConfig}
+          saveConfig={saveCompleteConfig}
+          openSiblingPanel={openSiblingPanel}
+          topics={[...topics]}
+          datatypes={datatypes}
+          capabilities={capabilities}
+          isHovered={isHovered}
+        />
+      ),
+      [panelComponentConfig, saveCompleteConfig, openSiblingPanel, topics, datatypes, capabilities, isHovered]
+    );
+
+    return (
+      // $FlowFixMe - bug prevents requiring panelType on PanelComponent: https://stackoverflow.com/q/52508434/23649
+      <PanelContext.Provider
+        value={{
+          type,
+          id: childId,
+          title,
+          config,
+          saveConfig: saveCompleteConfig,
+          updatePanelConfig,
+          openSiblingPanel,
+          enterFullscreen,
+          isHovered,
+          isFocused,
+          tabId,
+        }}>
+        {/* Ensure user exits full-screen mode when leaving window, even if key is still pressed down */}
+        <DocumentEvents target={window} enabled onBlur={onBlurDocument} />
+        <KeyListener global keyUpHandlers={keyUpHandlers} keyDownHandlers={keyDownHandlers} />
+        <Flex
+          onClick={onOverlayClick}
+          onMouseEnter={onMouseEnter}
+          onMouseLeave={onMouseLeave}
+          onMouseMove={onMouseMove}
+          style={{ border: `2px solid ${isSelected ? colors.BLUE : "transparent"}` }}
+          className={cx({ [styles.root]: true, [styles.rootFullScreen]: fullScreen })}
+          col
+          dataTest={`panel-mouseenter-container ${childId || ""}`}
+          clip>
+          {fullScreen ? <div className={styles.notClickable} /> : null}
+          {isSelected && !fullScreen && selectedPanelIds.length > 1 && (
+            <div data-tab-options className={styles.tabActionsOverlay}>
+              <Button style={{ backgroundColor: colors.BLUE }} onClick={groupPanels}>
+                <Icon small style={{ marginBottom: 5 }}>
+                  <BorderAllIcon />
+                </Icon>
+                Group in tab
+              </Button>
+              <Button style={{ backgroundColor: colors.BLUE }} onClick={createTabs}>
+                <Icon small style={{ marginBottom: 5 }}>
+                  <ExpandAllOutlineIcon />
+                </Icon>
+                Create {selectedPanelIds.length} tabs
+              </Button>
+            </div>
+          )}
+          {type !== TAB_PANEL_TYPE && quickActionsKeyPressed && !fullScreen && (
+            <div className={styles.quickActionsOverlay} data-panel-overlay>
+              <MosaicDragHandle tabId={tabId}>
+                <>
                   <div>
                     <FullscreenIcon />
-                    Fullscreen
+                    {shiftKeyPressed ? "Lock fullscreen" : "Fullscreen (Shift+click to lock)"}
                   </div>
                   <div>
-                    <Button onClick={this._closePanel} disabled={isOnlyPanel}>
-                      <CloseIcon />
+                    <Button onClick={closePanel} disabled={isOnlyPanel}>
+                      <TrashCanOutlineIcon />
                       Remove
                     </Button>
-                    <Button onClick={this._splitPanel}>
+                    <Button onClick={splitPanel}>
                       <GridLargeIcon />
                       Split
                     </Button>
                   </div>
                   {!isOnlyPanel && <p>Drag to move</p>}
-                </div>
+                </>
               </MosaicDragHandle>
-            )}
-            <ErrorBoundary>
-              {/* $FlowFixMe - https://github.com/facebook/flow/issues/6479 */}
-              <PanelComponent
-                config={{ ...defaultConfig, ...omit(config, TOPIC_PREFIX_CONFIG_KEY) }}
-                saveConfig={this._saveConfig}
-                openSiblingPanel={this._openSiblingPanel}
-                topics={getFilteredFormattedTopics(topics, currentTopicPrefix)}
-                datatypes={datatypes}
-                capabilities={capabilities}
-              />
-              {canSetTopicPrefix ? (
-                <TopicPrefixDropdown topicPrefix={currentTopicPrefix} saveTopicPrefix={this._saveTopicPrefix} />
-              ) : null}
-            </ErrorBoundary>
-          </Flex>
-        </PanelContext.Provider>
-      );
-    }
-  }
-
-  function ConnectedToPipelinePanel(props: any) {
-    return (
-      <MessagePipelineConsumer>
-        {(context: MessagePipelineContext) => {
-          return (
-            <UnconnectedPanel
-              {...props}
-              topics={context.sortedTopics}
-              datatypes={context.datatypes}
-              capabilities={context.playerState.capabilities}
-            />
-          );
-        }}
-      </MessagePipelineConsumer>
+            </div>
+          )}
+          {fullScreen ? (
+            <button className={styles.exitFullScreen} onClick={exitFullScreen} data-panel-overlay-exit>
+              <CloseIcon /> <span>Exit fullscreen</span>
+            </button>
+          ) : null}
+          <ErrorBoundary>{child}</ErrorBoundary>
+        </Flex>
+      </PanelContext.Provider>
     );
   }
+  ConnectedPanel.displayName = `Panel(${PanelComponent.displayName || PanelComponent.name || ""})`;
 
-  function mapStateToProps(state: ReduxState, ownProps: Props<Config>): ReduxMappedProps {
-    // Be careful when adding something here: it should not change often, otherwise
-    // all panels will rerender, which is very expensive.
-    return {
-      childId: ownProps.childId,
-      config: state.panels.savedProps[ownProps.childId] || ownProps.config,
-      isOnlyPanel: !isParent(state.panels.layout),
-    };
-  }
-
-  // There seems to be a circular dependency here, so defer loading a bit.
-  const { savePanelConfig } = require("webviz-core/src/actions/panels");
-
-  const ConnectedPanel = connect(
-    mapStateToProps,
-    { savePanelConfig }
-  )(ConnectedToPipelinePanel);
-
-  ConnectedPanel.defaultConfig = defaultConfig;
-  ConnectedPanel.panelType = PanelComponent.panelType;
-  ConnectedPanel.canSetTopicPrefix = PanelComponent.canSetTopicPrefix;
-
-  return ConnectedPanel;
+  const MemoizedConnectedPanel = React.memo(ConnectedPanel);
+  // $FlowFixMe - doesn't know underlying memoized PanelComponent's interface
+  MemoizedConnectedPanel.defaultConfig = PanelComponent.defaultConfig;
+  // $FlowFixMe - doesn't know underlying memoized PanelComponent's interface
+  MemoizedConnectedPanel.panelType = PanelComponent.panelType;
+  return MemoizedConnectedPanel;
 }

@@ -8,13 +8,14 @@
 
 export { default as Arrows } from "./Arrows";
 export { default as Axes } from "./Axes";
-export { default as Command, makeCommand, SUPPORTED_MOUSE_EVENTS } from "./Command";
+export { default as Command, SUPPORTED_MOUSE_EVENTS } from "./Command";
 export { default as Cones } from "./Cones";
 export { default as Cubes } from "./Cubes";
 export { default as Cylinders } from "./Cylinders";
 export { default as DrawPolygons, Polygon, PolygonPoint } from "./DrawPolygon/index";
 export { default as PolygonBuilder } from "./DrawPolygon/PolygonBuilder";
 export { default as FilledPolygons } from "./FilledPolygons";
+export { default as GLText } from "./GLText";
 export { default as GLTFScene } from "./GLTFScene";
 export { default as Grid } from "./Grid";
 export { default as Lines } from "./Lines";

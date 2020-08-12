@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -78,6 +78,24 @@ describe("time.formatDuration", () => {
   });
 });
 
+describe("time.formatDate", () => {
+  it("formats date based on provided timezone", () => {
+    expect(time.formatDate({ sec: 1, nsec: 0 }, "Asia/Bangkok")).toBe("1970-01-01");
+    expect(time.formatDate({ sec: 1, nsec: 1 }, "Australia/Currie")).toBe("1970-01-01");
+    expect(time.formatDate({ sec: 1000000, nsec: 0 }, "Pacific/Midway")).toBe("1970-01-12");
+    expect(time.formatDate({ sec: 1100000, nsec: 1000000000 }, "America/Los_Angeles")).toBe("1970-01-13");
+  });
+});
+
+describe("time.formatTime", () => {
+  it("formats time based on provided timezone", () => {
+    expect(time.formatTime({ sec: 1, nsec: 0 }, "America/Phoenix")).toBe("5:00:01.000 PM MST");
+    expect(time.formatTime({ sec: 1, nsec: 1 }, "America/Detroit")).toBe("7:00:01.000 PM EST");
+    expect(time.formatTime({ sec: 1, nsec: 999999999 }, "America/Phoenix")).toBe("5:00:01.999 PM MST");
+    expect(time.formatTime({ sec: 1, nsec: 1000000000 }, "America/Los_Angeles")).toBe("4:00:02.000 PM PST");
+  });
+});
+
 describe("time.formatTimeRaw", () => {
   it("formats whole values correction", () => {
     expect(time.formatTimeRaw({ sec: 1, nsec: 0 })).toEqual("1.000000000");
@@ -93,7 +111,9 @@ describe("time.formatTimeRaw", () => {
   });
 
   it("does not format negative times", () => {
+    jest.spyOn(console, "error").mockReturnValue();
     expect(time.formatTimeRaw({ sec: -1, nsec: 0 })).toEqual("(invalid negative time)");
+    expect(console.error).toHaveBeenCalled();
   });
 });
 
@@ -128,6 +148,7 @@ describe("time.fromMillis", () => {
   it("handles positive values", () => {
     expect(time.fromMillis(1)).toEqual({ sec: 0, nsec: 1000000 });
     expect(time.fromMillis(1000)).toEqual({ sec: 1, nsec: 0 });
+    expect(time.fromMillis(2000000000005)).toEqual({ sec: 2000000000, nsec: 5000000 });
   });
 
   it("handles negative values", () => {
@@ -136,13 +157,28 @@ describe("time.fromMillis", () => {
   });
 });
 
+describe("time.fromMicros", () => {
+  it("handles positive values", () => {
+    expect(time.fromMicros(1)).toEqual({ sec: 0, nsec: 1000 });
+    expect(time.fromMicros(1000)).toEqual({ sec: 0, nsec: 1000000 });
+    expect(time.fromMicros(1000000)).toEqual({ sec: 1, nsec: 0 });
+    expect(time.fromMicros(2000000000000005)).toEqual({ sec: 2000000000, nsec: 5000 });
+  });
+
+  it("handles negative values", () => {
+    expect(time.fromMicros(-1)).toEqual({ sec: -0, nsec: -1000 });
+    expect(time.fromMicros(-1000)).toEqual({ sec: -0, nsec: -1000000 });
+    expect(time.fromMicros(-1000000)).toEqual({ sec: -1, nsec: 0 });
+  });
+});
+
 describe("time.subtractTimes", () => {
   expect(time.subtractTimes({ sec: 1, nsec: 1 }, { sec: 1, nsec: 1 })).toEqual({ sec: 0, nsec: 0 });
   expect(time.subtractTimes({ sec: 1, nsec: 2 }, { sec: 2, nsec: 1 })).toEqual({ sec: -1, nsec: 1 });
   expect(time.subtractTimes({ sec: 5, nsec: 100 }, { sec: 2, nsec: 10 })).toEqual({ sec: 3, nsec: 90 });
-  expect(time.subtractTimes({ sec: 1, nsec: 1e8 }, { sec: 0, nsec: 5e8 })).toEqual({ sec: 1, nsec: -400000000 });
-  expect(time.subtractTimes({ sec: 1, nsec: 0 }, { sec: 0, nsec: 1e9 - 1 })).toEqual({ sec: 1, nsec: -999999999 });
-  expect(time.subtractTimes({ sec: 0, nsec: 0 }, { sec: 0, nsec: 1 })).toEqual({ sec: 0, nsec: -1 });
+  expect(time.subtractTimes({ sec: 1, nsec: 1e8 }, { sec: 0, nsec: 5e8 })).toEqual({ sec: 0, nsec: 600000000 });
+  expect(time.subtractTimes({ sec: 1, nsec: 0 }, { sec: 0, nsec: 1e9 - 1 })).toEqual({ sec: 0, nsec: 1 });
+  expect(time.subtractTimes({ sec: 0, nsec: 0 }, { sec: 0, nsec: 1 })).toEqual({ sec: -1, nsec: 1e9 - 1 });
 });
 
 describe("time.findClosestTimestampIndex", () => {
@@ -241,5 +277,31 @@ describe("time.parseTimeStr", () => {
       nsec: 317000000, // losing some accuracy when converting back
       sec: 1532382320,
     });
+  });
+});
+
+describe("time.getTimestampForMessage", () => {
+  it("uses headerStamp when available", () => {
+    const messageBase = {
+      topic: "/foo",
+      receiveTime: { sec: 1000, nsec: 0 },
+    };
+
+    expect(
+      time.getTimestampForMessage(
+        { ...messageBase, message: { header: { stamp: { sec: 123, nsec: 456 } } } },
+        "headerStamp"
+      )
+    ).toEqual({ sec: 123, nsec: 456 });
+    expect(
+      time.getTimestampForMessage(
+        { ...messageBase, message: { header: { stamp: { sec: 0, nsec: 0 } } } },
+        "headerStamp"
+      )
+    ).toEqual({ sec: 0, nsec: 0 });
+    expect(
+      time.getTimestampForMessage({ ...messageBase, message: { header: { stamp: { sec: 123 } } } }, "headerStamp")
+    ).toEqual(undefined);
+    expect(time.getTimestampForMessage({ ...messageBase, message: { header: {} } }, "headerStamp")).toEqual(undefined);
   });
 });

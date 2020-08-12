@@ -1,203 +1,237 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import CloseIcon from "@mdi/svg/svg/close.svg";
-import { pick } from "lodash";
-import React, { type Node, useState } from "react";
+import { partition, pick, without } from "lodash";
+import React, { type Node, useState, useMemo, useRef } from "react";
+import { hot } from "react-hot-loader/root";
+import ReactInputAutosize from "react-input-autosize";
 import styled from "styled-components";
 
 import helpContent from "./index.help.md";
 import Flex from "webviz-core/src/components/Flex";
-import GlobalVariablesAccessor from "webviz-core/src/components/GlobalVariablesAccessor";
-import Icon from "webviz-core/src/components/Icon";
 import Panel from "webviz-core/src/components/Panel";
 import PanelToolbar from "webviz-core/src/components/PanelToolbar";
+import useGlobalVariables from "webviz-core/src/hooks/useGlobalVariables";
+import { UnlinkGlobalVariables } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions";
+import { memoizedGetLinkedGlobalVariablesKeyByName } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/interactionUtils";
+import useLinkedGlobalVariables from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/useLinkedGlobalVariables";
+import inScreenshotTests from "webviz-core/src/stories/inScreenshotTests";
+import colors from "webviz-core/src/styles/colors.module.scss";
 import clipboard from "webviz-core/src/util/clipboard";
+import { GLOBAL_VARIABLES_QUERY_KEY } from "webviz-core/src/util/globalConstants";
 
-type Props = {};
+const SDeleteIcon = styled.span`
+  display: inline-block;
+  visibility: hidden;
+  font-size: 12px;
+  width: 19px;
+  cursor: pointer;
+  padding-left: 1px;
 
-const SButtonContainer = styled.div`
-  padding: 10px 16px 0;
+  &:hover {
+    color: white;
+  }
+`;
+
+const SGlobalVariables = styled.div`
   display: flex;
-`;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 8px 0;
+  white-space: nowrap;
 
-const SInput = styled.input`
-  background: transparent;
-  width: 100%;
-  color: white;
-`;
-
-const SSection = styled.section`
-  margin: 15px;
-`;
-
-const canParseJSON = (val) => {
-  try {
-    JSON.parse(val);
-  } catch (e) {
-    return false;
-  }
-  return true;
-};
-
-type InputProps = {
-  innerRef: { current: null | HTMLInputElement },
-  inputVal: string,
-  onChange: (Object) => void,
-};
-
-type State = {
-  inputVal: string,
-};
-
-class EditableJSONInput extends React.Component<InputProps, State> {
-  constructor(props: InputProps) {
-    super(props);
-    this.state = {
-      inputVal: props.inputVal,
-    };
+  table {
+    width: 99%;
   }
 
-  componentDidUpdate(prevProps: InputProps) {
-    if (prevProps.inputVal !== this.props.inputVal) {
-      this.setState({ inputVal: this.props.inputVal });
+  tr:nth-child(odd) {
+    background-color: #222;
+  }
+
+  tr:hover ${SDeleteIcon} {
+    visibility: visible;
+  }
+
+  td {
+    border: none;
+    padding: 0 8px;
+
+    input {
+      background: none !important;
+      color: inherit;
+      width: 100%;
+      padding-left: 0;
+      padding-right: 0;
+      min-width: 40px;
     }
   }
+`;
 
-  render() {
-    const { inputVal } = this.state;
-    const { innerRef, onChange } = this.props;
-    const isValid = canParseJSON(inputVal);
-    return (
-      <SInput
-        style={{ color: isValid ? "" : "#f97d96" }}
-        ref={innerRef}
-        type="text"
-        value={inputVal}
-        onChange={(e) => {
-          this.setState({ inputVal: e.target.value });
-          onChange(e);
-        }}
-      />
-    );
+const parseJson = (val: string): ?mixed => {
+  try {
+    return JSON.parse(val);
+  } catch (e) {
+    return undefined;
   }
+};
+
+const keyValMap = { ArrowDown: -1, ArrowUp: 1 };
+export function JSONInput(props: {| value: string, onChange: (mixed) => void |}) {
+  const [internalValue, setInternalValue] = useState<string>(props.value);
+  const lastPropsValue = useRef<string>(props.value);
+  if (lastPropsValue.current !== props.value) {
+    lastPropsValue.current = props.value;
+    setInternalValue(props.value);
+  }
+  const parsedValue = parseJson(internalValue);
+  const isValid = parsedValue !== undefined;
+  return (
+    <input
+      style={{ color: isValid ? "white" : colors.red }}
+      data-test="json-input"
+      type="text"
+      value={internalValue}
+      onChange={(e) => {
+        setInternalValue(e.target.value);
+        const newParsedValue = parseJson(e.target.value);
+        if (newParsedValue !== undefined) {
+          props.onChange(newParsedValue);
+        }
+      }}
+      onKeyDown={(e) => {
+        if (typeof parsedValue === "number" && keyValMap[e.key]) {
+          const newParsedValue = parsedValue + keyValMap[e.key];
+          setInternalValue(`${newParsedValue}`);
+          props.onChange(newParsedValue);
+        }
+      }}
+    />
+  );
 }
 
-const changeGlobalKey = (newKey, oldKey, globalData, idx, overwriteGlobalData) => {
-  const keys = Object.keys(globalData);
-  overwriteGlobalData({
-    ...pick(globalData, keys.slice(0, idx)),
-    [newKey]: globalData[oldKey],
-    ...pick(globalData, keys.slice(idx + 1)),
+function ValidatedResizingInput(props: {| value: string, onChange: (string) => void, invalidInputs: string[] |}) {
+  const [internalValue, setInternalValue] = useState<string>(props.value);
+  const lastPropsValue = useRef<string>(props.value);
+  if (lastPropsValue.current !== props.value) {
+    lastPropsValue.current = props.value;
+    setInternalValue(props.value);
+  }
+  return (
+    <ReactInputAutosize
+      style={{ color: !props.invalidInputs.includes(internalValue) ? "white" : colors.red }}
+      value={`$${internalValue}`}
+      onChange={(event) => {
+        const value = event.target.value.slice(1);
+        setInternalValue(value);
+        if (!props.invalidInputs.includes(value)) {
+          props.onChange(value);
+        }
+      }}
+    />
+  );
+}
+
+const changeGlobalKey = (newKey, oldKey, globalVariables, idx, overwriteGlobalVariables) => {
+  const keys = Object.keys(globalVariables);
+  overwriteGlobalVariables({
+    ...pick(globalVariables, keys.slice(0, idx)),
+    [newKey]: globalVariables[oldKey],
+    ...pick(globalVariables, keys.slice(idx + 1)),
   });
 };
 
-const changeGlobalVal = (newVal, datumKey, setGlobalData) => {
-  setGlobalData({ [datumKey]: newVal === undefined ? undefined : JSON.parse(String(newVal)) });
-};
+function GlobalVariables(): Node {
+  const [btnMessage, setBtnMessage] = useState<string>("Copy");
+  const { globalVariables, setGlobalVariables, overwriteGlobalVariables } = useGlobalVariables();
+  const { linkedGlobalVariables } = useLinkedGlobalVariables();
+  const globalVariableNames = Object.keys(globalVariables);
+  const linkedGlobalVariablesKeyByName = memoizedGetLinkedGlobalVariablesKeyByName(linkedGlobalVariables);
+  const [linked, unlinked] = partition(globalVariableNames, (name) => !!linkedGlobalVariablesKeyByName[name]);
 
-const getUpdatedURL = (globalData) => {
-  const queryParams = new URLSearchParams(window.location.search);
-  queryParams.set("global-data", JSON.stringify(globalData));
-  return `${window.location.host}/?${queryParams.toString()}`;
-};
-
-function GlobalVariables(props: Props): Node {
-  const input = React.createRef<HTMLInputElement>();
-  const [btnMessage, setBtnMessage] = useState("Copy");
-
-  const copyURL = (text) => () => {
-    clipboard.copy(text);
-    setBtnMessage("Copied!");
-  };
+  const url = useMemo(
+    () => {
+      const queryParams = new URLSearchParams(window.location.search);
+      queryParams.set(GLOBAL_VARIABLES_QUERY_KEY, JSON.stringify(globalVariables));
+      if (inScreenshotTests()) {
+        return `http://localhost:3000/?${queryParams.toString()}`;
+      }
+      return `${window.location.host}/?${queryParams.toString()}`;
+    },
+    [globalVariables]
+  );
 
   return (
-    <GlobalVariablesAccessor>
-      {(globalData, { setGlobalData, overwriteGlobalData }) => {
-        return (
-          <Flex col>
-            <PanelToolbar helpContent={helpContent} floating />
-            <table>
-              <tbody>
-                <tr>
-                  <th>key</th>
-                  <th>value</th>
-                </tr>
-                {Object.keys(globalData).map((datumKey, idx) => (
-                  <tr key={idx}>
-                    <td style={{ display: "flex" }}>
-                      <SInput
-                        type="text"
-                        value={`$${datumKey}`}
-                        onChange={(e) => {
-                          const newKey = e.target.value.slice(1);
-                          changeGlobalKey(newKey.trim(), datumKey, globalData, idx, overwriteGlobalData);
-                          setBtnMessage("Copy");
-                        }}
-                      />
-                    </td>
-                    <td>
-                      <EditableJSONInput
-                        innerRef={input}
-                        inputVal={JSON.stringify(globalData[datumKey])}
-                        onChange={(e) => {
-                          const newVal = e.target.value;
-                          if (canParseJSON(newVal)) {
-                            changeGlobalVal(newVal, datumKey, setGlobalData);
-                            setBtnMessage("Copy");
-                          }
-                        }}
-                      />
-                    </td>
-                    <td style={{ border: 0, background: "none" }}>
-                      <Icon
-                        onClick={() => {
-                          changeGlobalVal(undefined, datumKey, setGlobalData);
-                          setBtnMessage("Copy");
-                        }}>
-                        <CloseIcon />
-                      </Icon>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <SButtonContainer>
-              <button
-                onClick={(e) => {
-                  setGlobalData({ "": "" });
-                }}>
-                + Add variable
-              </button>
-              <button
-                onClick={(e) => {
-                  overwriteGlobalData({});
-                }}>
-                - Clear all
-              </button>
-            </SButtonContainer>
+    <SGlobalVariables>
+      <PanelToolbar helpContent={helpContent} floating />
+      <table>
+        <tbody>
+          {linked.map((name, idx) => {
+            return (
+              <tr key={`linked-${idx}`}>
+                <td>
+                  <UnlinkGlobalVariables name={name} />
+                </td>
+                <td width="100%">
+                  <JSONInput
+                    value={JSON.stringify(globalVariables[name] ?? "")}
+                    onChange={(newVal) => setGlobalVariables({ [name]: newVal })}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+          {unlinked.map((name, idx) => (
+            <tr key={`unlinked-${idx}`}>
+              <td data-test="global-variable-key">
+                <SDeleteIcon onClick={() => setGlobalVariables({ [name]: undefined })}>✕</SDeleteIcon>
+                <ValidatedResizingInput
+                  value={name}
+                  onChange={(newKey) =>
+                    changeGlobalKey(newKey, name, globalVariables, linked.length + idx, overwriteGlobalVariables)
+                  }
+                  invalidInputs={without(globalVariableNames, name).concat("")}
+                />
+              </td>
+              <td width="100%">
+                <JSONInput
+                  value={JSON.stringify(globalVariables[name] ?? "")}
+                  onChange={(newVal) => setGlobalVariables({ [name]: newVal })}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
 
-            <SSection>
-              <Flex>
-                <input readOnly style={{ width: "100%" }} type="text" value={getUpdatedURL(globalData)} />
-                {document.queryCommandSupported("copy") && (
-                  <button onClick={copyURL(getUpdatedURL(globalData))}>{btnMessage}</button>
-                )}
-              </Flex>
-            </SSection>
-          </Flex>
-        );
-      }}
-    </GlobalVariablesAccessor>
+      <Flex style={{ margin: 8 }}>
+        <button data-test="add-variable-btn" onClick={() => setGlobalVariables({ "": "" })}>
+          + Add variable
+        </button>
+        <input readOnly style={{ width: "100%" }} type="text" value={url} />
+        {document.queryCommandSupported("copy") && (
+          <button
+            onClick={() => {
+              clipboard.copy(url).then(() => {
+                setBtnMessage("Copied!");
+                setTimeout(() => {
+                  setBtnMessage("Copy");
+                }, 2000);
+              });
+            }}>
+            {btnMessage}
+          </button>
+        )}
+      </Flex>
+    </SGlobalVariables>
   );
 }
 
 GlobalVariables.panelType = "Global";
 GlobalVariables.defaultConfig = {};
 
-export default Panel<{}>(GlobalVariables);
+export default hot(Panel<{}>(GlobalVariables));

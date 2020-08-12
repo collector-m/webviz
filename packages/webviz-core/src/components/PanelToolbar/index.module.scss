@@ -1,4 +1,4 @@
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -6,17 +6,21 @@
 
 @import "~webviz-core/src/styles/colors.module.scss";
 
-$spacing: 4px;
+$panelToolbarHeight: 26px;
+$panelToolbarSpacing: 4px;
 
 .iconContainer {
-  padding-top: $spacing;
+  padding-top: $panelToolbarSpacing;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  margin-left: $spacing;
+  margin-left: $panelToolbarSpacing;
   flex-direction: row;
-  min-height: 22px;
+  min-height: $panelToolbarHeight - $panelToolbarSpacing;
   padding: 2px 2px 2px 6px;
+  svg {
+    font-size: 14px;
+  }
 }
 
 .panelName {
@@ -32,7 +36,7 @@ $spacing: 4px;
   flex-direction: row;
   justify-content: flex-end;
   background-color: $toolbar-fixed;
-  padding: 4px;
+  padding: $panelToolbarSpacing;
 
   &.floating {
     position: absolute;
@@ -44,11 +48,11 @@ $spacing: 4px;
     z-index: 5000;
     background-color: transparent;
     transform: translateY(-10px);
-    opacity: 0;
     pointer-events: none;
+    opacity: 0;
 
     * {
-      pointer-events: all;
+      pointer-events: auto;
     }
 
     &.hasChildren {
@@ -64,24 +68,10 @@ $spacing: 4px;
   }
 
   &:not(.floating) {
-    min-height: 30px;
-
-    .iconContainer {
-      display: none;
-
-      :global(.mosaic-window):hover & {
-        display: flex;
-      }
-    }
-
-    &.containsOpen .iconContainer {
-      display: flex;
-      opacity: 1;
-    }
+    min-height: $panelToolbarHeight + $panelToolbarSpacing;
   }
 
-  &.floating.containsOpen,
-  :global(.mosaic-window):hover & {
+  &.floatingShow {
     transform: translateY(0);
     opacity: 1;
   }

@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -9,7 +9,7 @@
 import { mat4, vec3, quat } from "gl-matrix";
 import type { Mat4 } from "gl-matrix";
 
-import type { TF, Pose, Point, Orientation } from "webviz-core/src/types/Messages";
+import type { TF, MutablePose, Pose, Point, Orientation } from "webviz-core/src/types/Messages";
 
 // allocate some temporary variables
 // so we can copy/in out of them during tf application
@@ -19,19 +19,18 @@ const tempPos = [0, 0, 0];
 const tempScale = [0, 0, 0];
 const tempOrient = [0, 0, 0, 0];
 
+function stripLeadingSlash(name: string) {
+  return name.startsWith("/") ? name.slice(1) : name;
+}
+
 export class Transform {
   id: string;
   matrix: Mat4 = mat4.create();
   parent: ?Transform;
-  valid = false;
+  _hasValidMatrix: boolean = false;
 
   constructor(id: string) {
-    this.id = id;
-  }
-
-  reset() {
-    mat4.identity(this.matrix);
-    this.valid = true;
+    this.id = stripLeadingSlash(id);
   }
 
   set(position: Point, orientation: Orientation) {
@@ -40,10 +39,15 @@ export class Transform {
       quat.set(tempOrient, orientation.x, orientation.y, orientation.z, orientation.w),
       vec3.set(tempPos, position.x, position.y, position.z)
     );
-    this.valid = true;
+    this._hasValidMatrix = true;
+  }
+
+  isValid(rootId: string) {
+    return this._hasValidMatrix || this.id === rootId;
   }
 
   isChildOfTransform(rootId: string): boolean {
+    rootId = stripLeadingSlash(rootId);
     if (!this.parent) {
       return this.id === rootId;
     }
@@ -57,7 +61,12 @@ export class Transform {
     return this.parent.rootTransform();
   }
 
-  apply(output: Pose, input: Pose, rootId: string): ?Pose {
+  apply(output: MutablePose, input: Pose, rootId: string): ?MutablePose {
+    rootId = stripLeadingSlash(rootId);
+    if (!this.isValid(rootId)) {
+      return null;
+    }
+
     if (this.id === rootId) {
       output.position.x = input.position.x;
       output.position.y = input.position.y;
@@ -68,11 +77,9 @@ export class Transform {
       output.orientation.w = input.orientation.w;
       return output;
     }
-    if (!this.valid) {
-      return null;
-    }
+
+    // Can't apply if this transform doesn't map to the root transform.
     if (!this.isChildOfTransform(rootId)) {
-      // Can't apply if this transform doesn't map to the root transform.
       return null;
     }
 
@@ -123,6 +130,7 @@ export class Transform {
 class TfStore {
   storage = {};
   get(key: string): Transform {
+    key = stripLeadingSlash(key);
     let result = this.storage[key];
     if (result) {
       return result;
@@ -156,7 +164,7 @@ export default class Transforms {
   // or return a new one by calling with apply({ position: { }, orientation: {} }, original).
   // Returns the output pose, or the input pose if no transform was needed, or null if the transform
   // is not available -- the return value must not be ignored.
-  apply(output: Pose, original: Pose, frameId: string, rootId: string): ?Pose {
+  apply(output: MutablePose, original: Pose, frameId: string, rootId: string): ?MutablePose {
     const tf = this.storage.get(frameId);
     return tf.apply(output, original, rootId);
   }

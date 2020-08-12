@@ -1,150 +1,165 @@
 /* eslint-disable header/header */
 
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import * as Sentry from "@sentry/browser";
 import React from "react";
 import ReactDOM from "react-dom";
-import { routerMiddleware } from "react-router-redux";
 
 // We put all the internal requires inside functions, so that when they load the hooks have been properly set.
 
+let importedPanelsByCategory;
+let importedPerPanelHooks;
 const defaultHooks = {
+  areHooksImported: () => importedPanelsByCategory && importedPerPanelHooks,
+  getEventLogger: () => undefined,
+  async importHooksAsync() {
+    return new Promise((resolve, reject) => {
+      if (importedPanelsByCategory && importedPerPanelHooks) {
+        resolve();
+      }
+      import(/* webpackChunkName: "hooks_bundle" */ "./hooksImporter")
+        .then((hooksImporter) => {
+          importedPerPanelHooks = hooksImporter.perPanelHooks();
+          importedPanelsByCategory = hooksImporter.panelsByCategory();
+          resolve();
+        })
+        .catch((reason) => {
+          Sentry.captureException(new Error(reason));
+          reject(`Failed to import hooks bundle: ${reason}`);
+        });
+    });
+  },
   nodes: () => [],
-  migratePanels: (panels) => panels,
-  panelList() {
-    const DiagnosticStatusPanel = require("webviz-core/src/panels/diagnostics/DiagnosticStatusPanel").default;
-    const DiagnosticSummary = require("webviz-core/src/panels/diagnostics/DiagnosticSummary").default;
-    const ImageViewPanel = require("webviz-core/src/panels/ImageView").default;
-    const Internals = require("webviz-core/src/panels/Internals").default;
-    const NumberOfRenders = require("webviz-core/src/panels/NumberOfRenders").default;
-    const Plot = require("webviz-core/src/panels/Plot").default;
-    const Rosout = require("webviz-core/src/panels/Rosout").default;
-    const StateTransitions = require("webviz-core/src/panels/StateTransitions").default;
-    const ThreeDimensionalViz = require("webviz-core/src/panels/ThreeDimensionalViz").default;
-    const RawMessages = require("webviz-core/src/panels/RawMessages").default;
-    const { ndash } = require("webviz-core/src/util/entities");
-
+  getDefaultGlobalStates() {
+    const { defaultPlaybackConfig } = require("webviz-core/src/reducers/panels");
+    /* eslint-disable no-restricted-modules */
+    const { CURRENT_LAYOUT_VERSION } = require("webviz-core/migrations/constants");
+    return {
+      layout: {
+        direction: "row",
+        first: "DiagnosticSummary!3edblo1",
+        second: {
+          direction: "row",
+          first: "RosOut!1f38b3d",
+          second: "3D Panel!1my2ydk",
+          splitPercentage: 50,
+        },
+        splitPercentage: 33.3333333333,
+      },
+      savedProps: {},
+      globalVariables: {},
+      userNodes: {},
+      linkedGlobalVariables: [],
+      playbackConfig: defaultPlaybackConfig,
+      version: CURRENT_LAYOUT_VERSION,
+    };
+  },
+  getDefaultGlobalVariables: () => ({}),
+  migratePanels(panels) {
+    const migratePanels = require("webviz-core/migrations").default;
+    return migratePanels(panels);
+  },
+  panelCategories() {
     return [
-      { title: "rosout", component: Rosout },
-      { title: "Image", component: ImageViewPanel },
-      { title: "Raw Messages", component: RawMessages },
-      { title: "Plot", component: Plot },
-      { title: "State Transitions", component: StateTransitions },
-      { title: "3D", component: ThreeDimensionalViz },
-      { title: `Diagnostics ${ndash} Summary`, component: DiagnosticSummary },
-      { title: `Diagnostics ${ndash} Detail`, component: DiagnosticStatusPanel },
-      { title: "Webviz Internals", component: Internals },
-      { title: "Number of Renders", component: NumberOfRenders, hideFromList: true },
+      { label: "ROS", key: "ros" },
+      { label: "Utilities", key: "utilities" },
+      { label: "Debugging", key: "debugging" },
     ];
+  },
+  panelsByCategory: () => {
+    if (!importedPanelsByCategory) {
+      throw new Error("panelsByCategory requested before hooks have been imported");
+    }
+    return importedPanelsByCategory;
   },
   helpPageFootnote: () => null,
   perPanelHooks: () => {
-    const World = require("webviz-core/src/panels/ThreeDimensionalViz/World").default;
-    const LaserScanVert = require("webviz-core/src/panels/ThreeDimensionalViz/LaserScanVert").default;
-    const FileMultipleIcon = require("@mdi/svg/svg/file-multiple.svg").default;
-    const CheckboxBlankCircleOutline = require("@mdi/svg/svg/checkbox-blank-circle-outline.svg").default;
-    const { defaultMapPalette } = require("webviz-core/src/panels/ThreeDimensionalViz/commands/utils");
-
-    const { SECOND_BAG_PREFIX } = require("webviz-core/src/util/globalConstants");
-
-    const getMetadata = () => {};
-    getMetadata.topics = [];
+    if (!importedPerPanelHooks) {
+      throw new Error("perPanelHooks requested before hooks have been imported");
+    }
+    return importedPerPanelHooks;
+  },
+  startupPerPanelHooks: () => {
     return {
-      Panel: {
-        topicPrefixes: {
-          "": {
-            labelText: "Default",
-            icon: CheckboxBlankCircleOutline,
-            iconPrefix: "",
-          },
-          [SECOND_BAG_PREFIX]: {
-            labelText: "Input 2",
-            icon: FileMultipleIcon,
-            iconPrefix: "2",
-            tooltipText: "topics prefixed with '/webviz_bag_2'",
-          },
-        },
-      },
-      DiagnosticSummary: { defaultConfig: { pinnedIds: [] } },
-      ImageView: {
-        defaultConfig: {
-          cameraTopic: "",
-          enabledMarkerNames: [],
-          scale: 0.2,
-          transformMarkers: false,
-          synchronize: false,
-        },
-        imageMarkerDatatypes: ["visualization_msgs/ImageMarker"],
-        imageMarkerArrayDatatypes: [],
-        canTransformMarkersByTopic: (topic) => !topic.includes("rect"),
-      },
-      StateTransitions: { defaultConfig: { paths: [] }, customStateTransitionColors: {} },
       ThreeDimensionalViz: {
-        defaultConfig: {
-          checkedNodes: ["name:Topics"],
-          expandedNodes: ["name:Topics"],
-          followTf: null,
-          cameraState: {},
-          modifiedNamespaceTopics: [],
-          pinTopics: false,
-          topicSettings: {},
+        getDefaultTopicSettingsByColumn(_topicName) {
+          return undefined;
         },
-        topics: [],
-        editableTopics: [],
-        icons: {},
-        WorldComponent: World,
-        LaserScanVert,
-        getMetadata,
-        migrateConfig: () => false,
-        setGlobalDataInSceneBuilder: (globalData, selectionState, topicsToRender) => ({
-          selectionState,
-          topicsToRender,
+        getDefaultSettings: () => ({}),
+        getDefaultTopicTree: () => ({
+          name: "root",
+          children: [
+            { name: "TF", topicName: "/tf", children: [], description: "Visualize relationships between /tf frames." },
+          ],
         }),
-        consumeMessage: (topic, msg, consumeMethods, { errors }) => {
-          errors.topicsWithError.set(topic, `Unrecognized topic datatype for scene: ${msg.datatype}`);
-        },
-        getMessagePose: (msg) => msg.message.pose,
-        addMarkerToCollector: () => {},
-        getSyntheticArrowMarkerColor: () => ({ r: 0, g: 0, b: 1, a: 0.5 }),
-        getFlattenedPose: () => undefined,
-        getOccupancyGridValues: (topic) => [0.5, "map"],
-        getMapPalette() {
-          return defaultMapPalette;
-        },
-        consumePose: () => {},
-        getMarkerColor: (topic, markerColor) => markerColor,
-        getDefaultTopicTree: () => ({ name: "root" }),
-        hasBlacklistTopics: () => false,
-        renderTopicSettings: () => {},
-        ungroupedNodesCategory: "Topics",
-        rootTransformFrame: "map",
-        defaultFollowTransformFrame: null,
-        skipTransformFrame: null,
+        getStaticallyAvailableNamespacesByTopic: () => ({}),
       },
-      RawMessages: { docLinkFunction: () => undefined },
     };
   },
   Root({ store }) {
     const Root = require("webviz-core/src/components/Root").default;
     return <Root store={store} />;
   },
-  skipBrowserConfirmation: () => false,
-  topicsWithIncorrectHeaders: () => [],
-  heavyDatatypesWithNoTimeDependency: () => [
-    "sensor_msgs/PointCloud2",
-    "sensor_msgs/LaserScan",
-    "nav_msgs/OccupancyGrid",
-  ],
-  useRaven: () => true,
-  load: () => {},
-  onPanelClose: () => {},
-  onPanelSwap: () => {},
-  onPanelSplit: () => {},
-  onPanelDrag: () => {},
+  load: () => {
+    if (process.env.NODE_ENV === "production" && window.ga) {
+      window.ga("create", "UA-82819136-10", "auto");
+    } else {
+      window.ga = function(...args) {
+        console.log("[debug] ga:", ...args);
+      };
+    }
+    window.ga("send", "pageview");
+  },
+  getWorkerDataProviderWorker: () => {
+    return require("webviz-core/src/dataProviders/WorkerDataProvider.worker");
+  },
+  getAdditionalDataProviders: () => {},
+  experimentalFeaturesList() {
+    return {
+      groupLines: {
+        name: "Group Lines When Rendering",
+        description: "A faster method of rendering lines in the 3D panel by grouping them together.",
+        developmentDefault: true,
+        productionDefault: true,
+      },
+      diskBagCaching: {
+        name: "Disk Bag Caching (requires reload)",
+        description:
+          "When streaming bag data, persist it on disk, so that when reloading the page we don't have to download the data again. However, this might result in an overall slower experience, and is generally experimental, so we only recommend it if you're on a slow network connection. Alternatively, you can download the bag to disk manually, and drag it into Webviz.",
+        developmentDefault: false,
+        productionDefault: false,
+      },
+      preloading: {
+        name: "Preloading",
+        description: "Allow panels to use data from caches directly, without playback.",
+        developmentDefault: true,
+        productionDefault: true,
+      },
+      unlimitedMemoryCache: {
+        name: "Unlimited in-memory cache (requires reload)",
+        description:
+          "If you have a lot of memory in your computer, and you frequently have to play all the way through large bags, you can turn this on to fully buffer the bag into memory. However, use at your own risk, as this might crash the browser.",
+        developmentDefault: false,
+        productionDefault: false,
+      },
+      highlightGlobalVariableMatchingMarkers: {
+        name: "Highlight markers matching linked global variables",
+        description: "Markers matching any linkedGlobalVariables will be automatically highlighted in the 3D panel",
+        developmentDefault: false,
+        productionDefault: false,
+      },
+    };
+  },
+  linkMessagePathSyntaxToHelpPage: () => true,
+  getSecondSourceUrlParams() {
+    const { REMOTE_BAG_URL_2_QUERY_KEY } = require("webviz-core/src/util/globalConstants");
+    return [REMOTE_BAG_URL_2_QUERY_KEY];
+  },
 };
 
 let hooks = defaultHooks;
@@ -168,20 +183,20 @@ export function loadWebviz(hooksToSet) {
 
   require("webviz-core/src/styles/global.scss");
   const prepareForScreenshots = require("webviz-core/src/stories/prepareForScreenshots").default;
-  const installChartjs = require("webviz-core/src/util/installChartjs").default;
+  const installDevtoolsFormatters = require("webviz-core/src/util/installDevtoolsFormatters").default;
+  const overwriteFetch = require("webviz-core/src/util/overwriteFetch").default;
+  const { hideLoadingLogo } = require("webviz-core/src/util/hideLoadingLogo");
+  const { clearIndexedDbWithoutConfirmation } = require("webviz-core/src/util/indexeddb/clearIndexedDb");
 
-  installChartjs();
   prepareForScreenshots(); // For integration screenshot tests.
+  installDevtoolsFormatters();
+  overwriteFetch();
+  window.clearIndexedDb = clearIndexedDbWithoutConfirmation; // For integration tests.
 
   hooks.load();
 
   const waitForFonts = require("webviz-core/src/styles/waitForFonts").default;
   const Confirm = require("webviz-core/src/components/Confirm").default;
-  const rootReducer = require("webviz-core/src/reducers").default;
-  const configureStore = require("webviz-core/src/store").default;
-  const history = require("webviz-core/src/util/history").default;
-
-  const store = configureStore(rootReducer, [routerMiddleware(history)]);
 
   function render() {
     const rootEl = document.getElementById("root");
@@ -190,8 +205,8 @@ export function loadWebviz(hooksToSet) {
       throw new Error("missing #root element");
     }
 
-    waitForFonts(() => {
-      ReactDOM.render(<hooks.Root store={store} history={history} />, rootEl);
+    waitForFonts().then(() => {
+      ReactDOM.render(<hooks.Root history={history} />, rootEl);
     });
   }
 
@@ -199,7 +214,8 @@ export function loadWebviz(hooksToSet) {
   // From https://stackoverflow.com/a/4900484
   const chromeMatch = navigator.userAgent.match(/Chrom(e|ium)\/([0-9]+)\./);
   const chromeVersion = chromeMatch ? parseInt(chromeMatch[2], 10) : 0;
-  if (chromeVersion < MINIMUM_CHROME_VERSION && !hooks.skipBrowserConfirmation()) {
+  if (chromeVersion < MINIMUM_CHROME_VERSION) {
+    hideLoadingLogo();
     Confirm({
       title: "Update your browser",
       prompt:

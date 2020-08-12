@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, GM Cruise LLC
+//  Copyright (c) 2018-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -8,10 +8,10 @@
 
 import CloseIcon from "@mdi/svg/svg/close.svg";
 import * as React from "react";
-import KeyListener from "react-key-listener";
 import styled from "styled-components";
 
 import Icon from "webviz-core/src/components/Icon";
+import KeyListener from "webviz-core/src/components/KeyListener";
 import colors from "webviz-core/src/styles/colors.module.scss";
 
 // Generic modal that renders a semi-transparent backdrop and close icon.
@@ -22,6 +22,7 @@ export const Title = styled.h3`
   padding-bottom: 16px;
   color: ${colors.textBright};
   font-size: 22px;
+  line-height: 1.4;
 `;
 
 const Container = styled.div`
@@ -30,7 +31,7 @@ const Container = styled.div`
   left: 0;
   bottom: 0;
   right: 0;
-  z-index: 999;
+  z-index: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -63,7 +64,7 @@ export default class Modal extends React.PureComponent<Props> {
   render() {
     return (
       <Container
-        innerRef={(el) => {
+        ref={(el) => {
           if (
             el &&
             el.parentElement &&
@@ -85,6 +86,7 @@ export default class Modal extends React.PureComponent<Props> {
           <KeyListener global keyDownHandlers={{ Escape: this.props.onRequestClose }} />
           <Icon
             fade
+            dataTest="modal-close-icon"
             style={{
               position: "absolute",
               right: 16,
