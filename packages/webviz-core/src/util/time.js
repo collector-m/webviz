@@ -6,48 +6,31 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { isEqual } from "lodash";
-import momentDurationFormatSetup from "moment-duration-format";
-import moment from "moment-timezone";
+// No time functions that require `moment` should live in this file.
 import { type Time, TimeUtil } from "rosbag";
 
-import type { Message } from "webviz-core/src/players/types";
-import { SEEK_TO_QUERY_KEY } from "webviz-core/src/util/globalConstants";
+import { type Message } from "webviz-core/src/players/types";
+import {
+  SEEK_TO_FRACTION_QUERY_KEY,
+  SEEK_TO_RELATIVE_MS_QUERY_KEY,
+  SEEK_TO_QUERY_KEY,
+  SEEK_ON_START_NS,
+} from "webviz-core/src/util/globalConstants";
 
+export const DEFAULT_ZERO_TIME = { sec: 0, nsec: 0 };
 type BatchTimestamp = {
   seconds: number,
   nanoseconds: number,
 };
 
-momentDurationFormatSetup(moment);
-
 export type TimestampMethod = "receiveTime" | "headerStamp";
 
 // Unfortunately, using %checks on this function doesn't actually allow Flow to conclude that the object is a Time.
 // Related: https://github.com/facebook/flow/issues/3614
-const timeFields = new Set(["sec", "nsec"]);
 export function isTime(obj: mixed): boolean {
-  return !!obj && typeof obj === "object" && isEqual(new Set(Object.getOwnPropertyNames(obj)), timeFields);
-}
-
-export function format(stamp: Time) {
-  return `${formatDate(stamp)} ${formatTime(stamp)}`;
-}
-
-export function formatDate(stamp: Time, timezone?: ?string) {
-  if (stamp.sec < 0 || stamp.nsec < 0) {
-    console.error("Times are not allowed to be negative");
-    return "(invalid negative time)";
-  }
-  return moment.tz(toDate(stamp), timezone || moment.tz.guess()).format("YYYY-MM-DD");
-}
-
-export function formatTime(stamp: Time, timezone?: ?string) {
-  if (stamp.sec < 0 || stamp.nsec < 0) {
-    console.error("Times are not allowed to be negative");
-    return "(invalid negative time)";
-  }
-  return moment.tz(toDate(stamp), timezone || moment.tz.guess()).format("h:mm:ss.SSS A z");
+  return (
+    !!obj && typeof obj === "object" && "sec" in obj && "nsec" in obj && Object.getOwnPropertyNames(obj).length === 2
+  );
 }
 
 export function formatTimeRaw(stamp: Time) {
@@ -73,10 +56,6 @@ export function fromSecondStamp(stamp: string): Time {
   return { sec: parseInt(secondString), nsec: parseInt(nanosecond) };
 }
 
-export function formatDuration(stamp: Time) {
-  return moment.duration(Math.round(stamp.sec * 1000 + stamp.nsec / 1e6)).format("h:mm:ss.SSS", { trim: false });
-}
-
 // note: sub-millisecond precision is lost
 export function toDate(stamp: Time): Date {
   const { sec, nsec } = stamp;
@@ -97,11 +76,16 @@ export function percentOf(start: Time, end: Time, target: Time) {
   return (toSec(targetDuration) / toSec(totalDuration)) * 100;
 }
 
+export function interpolateTimes(start: Time, end: Time, fraction: number): Time {
+  const duration = subtractTimes(end, start);
+  return TimeUtil.add(start, fromNanoSec(fraction * toNanoSec(duration)));
+}
+
 function fixTime(t: Time): Time {
   // Equivalent to fromNanoSec(toNanoSec(t)), but no chance of precision loss.
   // nsec should be non-negative, and less than 1e9.
   let { sec, nsec } = t;
-  while (nsec > 1e9) {
+  while (nsec >= 1e9) {
     nsec -= 1e9;
     sec += 1;
   }
@@ -129,7 +113,7 @@ export function toMicroSec({ sec, nsec }: Time) {
 }
 
 // WARNING! Imprecise float; see above.
-export function toSec({ sec, nsec }: Time) {
+export function toSec({ sec, nsec }: Time): number {
   return sec + nsec * 1e-9;
 }
 
@@ -224,12 +208,12 @@ export function getNextFrame(currentTime: Time, timestamps: string[] = [], goLef
   return fromSecondStamp(nextFrame);
 }
 
-export function formatFrame({ sec, nsec }: Time): string {
+export function rosTimeToUrlTime({ sec, nsec }: Time): string {
   return `${sec}.${String.prototype.padStart.call(nsec, 9, "0")}`;
 }
 
 export function transformBatchTimestamp({ seconds, nanoseconds }: BatchTimestamp): string {
-  return formatFrame({ sec: seconds, nsec: nanoseconds });
+  return rosTimeToUrlTime({ sec: seconds, nsec: nanoseconds });
 }
 
 export function clampTime(time: Time, start: Time, end: Time): Time {
@@ -242,35 +226,86 @@ export function clampTime(time: Time, start: Time, end: Time): Time {
   return time;
 }
 
-export function parseRosTimeStr(str: string): ?Time {
+export const isTimeInRangeInclusive = (time: Time, start: Time, end: Time) => {
+  if (TimeUtil.compare(start, time) > 0 || TimeUtil.compare(end, time) < 0) {
+    return false;
+  }
+  return true;
+};
+
+export function parseRosTimeStr(str: ?string): ?Time {
+  if (!str) {
+    return undefined;
+  }
   if (/^\d+\.?$/.test(str)) {
+    // Whole number with optional "." at the end.
     return { sec: parseInt(str, 10) || 0, nsec: 0 };
   }
   if (!/^\d+\.\d+$/.test(str)) {
-    return null;
+    // Not digits.digits -- invalid.
+    return undefined;
   }
   const partials = str.split(".");
   if (partials.length === 0) {
-    return null;
+    return undefined;
   }
-  return { sec: parseInt(partials[0], 10) || 0, nsec: parseInt(partials[1], 10) || 0 };
+  // There can be 9 digits of nanoseconds. If the fractional part is "1", we need to add eight
+  // zeros. Also, make sure we round to an integer if we need to remove digits.
+  const digitsShort = 9 - partials[1].length;
+  const nsec = Math.round(parseInt(partials[1], 10) * 10 ** digitsShort);
+  // It's possible we rounded to { sec: 1, nsec: 1e9 }, which is invalid, so fixTime.
+  return fixTime({ sec: parseInt(partials[0], 10) || 0, nsec });
 }
 
-export function parseTimeStr(str: string): ?Time {
-  const newMomentTimeObj = moment(str, "YYYY-MM-DD h:mm:ss.SSS A z");
-  const date = newMomentTimeObj.toDate();
-  const result = (newMomentTimeObj.isValid() && fromDate(date)) || null;
+// Functions and types for specifying and applying player initial seek time intentions.
+// When loading from a copied URL, the exact unix time is used.
+type AbsoluteSeekToTime = $ReadOnly<{| type: "absolute", time: Time |}>;
+// If no seek time is specified, we default to 299ms from the start of the bag. Finer control is
+// exposed for use-cases where it's needed.
+type RelativeSeekToTime = $ReadOnly<{| type: "relative", startOffset: Time |}>;
+// Currently unused: We may expose interactive seek controls before the bag duration is known, and
+// store the seek state as a fraction of the eventual bag length.
+type SeekFraction = $ReadOnly<{| type: "fraction", fraction: number |}>;
+export type SeekToTimeSpec = AbsoluteSeekToTime | RelativeSeekToTime | SeekFraction;
 
-  if (!result || result.sec <= 0 || result.nsec < 0) {
-    return null;
+export function getSeekToTime(search: ?string): SeekToTimeSpec {
+  const params = new URLSearchParams(search || window.location.search);
+  const absoluteSeek = params.get(SEEK_TO_QUERY_KEY);
+  const defaultResult = { type: "relative", startOffset: fromNanoSec(SEEK_ON_START_NS) };
+  if (absoluteSeek != null) {
+    if (!absoluteSeek.includes(".")) {
+      const absoluteSeekVal = parseInt(absoluteSeek);
+      return isNaN(absoluteSeek) || absoluteSeekVal < 0
+        ? defaultResult
+        : { type: "absolute", time: fromMillis(absoluteSeekVal) };
+    }
+    const seekToRosTime = parseRosTimeStr(absoluteSeek);
+    return seekToRosTime ? { type: "absolute", time: seekToRosTime } : defaultResult;
   }
-  return result;
+
+  const relativeSeek = params.get(SEEK_TO_RELATIVE_MS_QUERY_KEY);
+  if (relativeSeek != null) {
+    const relativeSeekVal = parseInt(relativeSeek);
+    return isNaN(relativeSeek) || relativeSeekVal < 0
+      ? defaultResult
+      : { type: "relative", startOffset: fromMillis(relativeSeekVal) };
+  }
+  const seekFraction = params.get(SEEK_TO_FRACTION_QUERY_KEY);
+  if (seekFraction != null) {
+    const seekFractionVal = parseFloat(seekFraction);
+    return isNaN(seekFraction) || seekFractionVal < 0 ? defaultResult : { type: "fraction", fraction: seekFractionVal };
+  }
+  return defaultResult;
 }
 
-export function getSeekToTime(): ?Time {
-  const params = new URLSearchParams(window.location.search);
-  const seekToParam = params.get(SEEK_TO_QUERY_KEY);
-  return seekToParam ? fromMillis(parseInt(seekToParam)) : null;
+export function getSeekTimeFromSpec(spec: SeekToTimeSpec, start: Time, end: Time): Time {
+  const rawSpecTime =
+    spec.type === "absolute"
+      ? spec.time
+      : spec.type === "relative"
+      ? TimeUtil.add(TimeUtil.isLessThan(spec.startOffset, { sec: 0, nsec: 0 }) ? end : start, spec.startOffset)
+      : interpolateTimes(start, end, spec.fraction);
+  return clampTime(rawSpecTime, start, end);
 }
 
 export function getTimestampForMessage(message: Message, timestampMethod?: TimestampMethod): ?Time {
@@ -281,4 +316,14 @@ export function getTimestampForMessage(message: Message, timestampMethod?: Times
     return undefined;
   }
   return message.receiveTime;
+}
+
+export function getDisplayedTimestampMethod(timestampMethod?: TimestampMethod): string {
+  return timestampMethod === "headerStamp" ? "Header stamp" : "Receive time";
+}
+
+export function formatSeconds(sec: number): string {
+  const date = new Date(0);
+  date.setSeconds(sec);
+  return date.toISOString().substr(11, 8);
 }

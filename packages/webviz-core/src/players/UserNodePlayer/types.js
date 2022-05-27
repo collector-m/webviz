@@ -5,6 +5,9 @@
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
+import type { Time } from "rosbag";
+
+import { type GlobalVariables } from "webviz-core/src/hooks/useGlobalVariables";
 import type { Topic, Message } from "webviz-core/src/players/types";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 
@@ -43,6 +46,8 @@ export const ErrorCodes = {
     STRICT_MARKERS_RETURN_TYPE: 14,
     LIMITED_UNIONS: 15,
     NO_NESTED_ANY: 16,
+    NO_MAPPED_TYPES: 17,
+    NO_NESTED_ARRAYS: 18,
   },
   InputTopicsChecker: {
     NO_TOPIC_AVAIL: 1,
@@ -60,12 +65,6 @@ export const ErrorCodes = {
     FILENAME: 1,
   },
 };
-export type NodeRegistration = {|
-  inputs: $ReadOnlyArray<string>,
-  output: Topic,
-  processMessage: (Message) => Promise<?Message>,
-  terminate: () => void,
-|};
 
 export type Diagnostic = {|
   severity: $Values<typeof DiagnosticSeverity>,
@@ -93,18 +92,21 @@ export type NodeData = {|
   sourceFile: ?any,
   typeChecker: ?any,
   rosLib: string,
+  enableSecondSource: boolean,
+  // An array of globalVariable names
+  globalVariables: $ReadOnlyArray<string>,
 |};
 
-export type PlayerInfo = $ReadOnly<{|
-  topics: Topic[],
-  datatypes: RosDatatypes,
-|}>;
-
-export type NodeDataTransformer = (
+export type NodeRegistration = {|
+  nodeId: string,
   nodeData: NodeData,
-  playerStateActiveData: ?PlayerInfo,
-  priorRegistrations: $ReadOnlyArray<Topic>
-) => NodeData;
+  inputs: $ReadOnlyArray<string>,
+  output: Topic,
+  processMessages: (Message[], RosDatatypes, GlobalVariables) => Promise<Message[]>,
+  terminate: () => void,
+|};
+
+export type NodeDataTransformer = (nodeData: NodeData, topics: Topic[]) => NodeData;
 
 export type UserNodeLog = {
   source: "registerNode" | "processMessage",
@@ -121,8 +123,25 @@ export type RegistrationOutput = {
 };
 
 export type ProcessMessageOutput = {
-  message: ?{},
+  message: ?Message,
   error: null | string,
   userNodeLogs: UserNodeLog[],
-  userNodeDiagnostics: Diagnostic[],
 };
+
+export type ProcessMessagesOutput =
+  | {
+      error: null | string,
+      userNodeLogs: UserNodeLog[],
+      type: "parsed",
+      messages: Message[],
+    }
+  | {
+      error: null | string,
+      userNodeLogs: UserNodeLog[],
+      type: "binary",
+      binaryData: {
+        bigString: string,
+        buffer: ArrayBuffer,
+        serializedMessages: { offset: number, receiveTime: Time, topic: string }[],
+      },
+    };

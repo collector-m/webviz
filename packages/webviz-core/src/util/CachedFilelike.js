@@ -47,10 +47,9 @@ export type FileStream = {
 export interface FileReader {
   open(): Promise<{ size: number }>;
   fetch(offset: number, length: number): FileStream;
-  +recordBytesPerSecond?: (number) => void; // For logging / metrics.
 }
 
-const LOGGING_INTERVAL_IN_BYTES = 1024 * 1024 * 10; // Log every 10MiB to avoid cluttering the logs too much.
+const LOGGING_INTERVAL_IN_BYTES = 1024 * 1024 * 500; // Log every 500MiB to avoid cluttering the logs too much.
 const CACHE_BLOCK_SIZE = 1024 * 1024 * 10; // 10MiB blocks.
 // Don't start a new connection if we're 5MiB away from downloading the requested byte.
 // TODO(JP): It would be better (but a bit more involved) to express this in seconds, and take into
@@ -221,7 +220,6 @@ export default class CachedFilelike implements Filelike {
           this._logFn(`Connection @ ${rangeToString(range)} threw another error; closing: ${error.toString()}`);
 
           this._closed = true;
-          currentConnection.stream.destroy();
           for (const request of this._readRequests) {
             request.callback(error);
           }
@@ -233,6 +231,7 @@ export default class CachedFilelike implements Filelike {
       // mark the current connection as destroyed, and try again.
       this._logFn(`Connection @ ${rangeToString(range)} threw error; trying to continue: ${error.toString()}`);
       this._lastErrorTime = Date.now();
+      currentConnection.stream.destroy();
       delete this._currentConnection;
       this._updateState();
     });
@@ -264,9 +263,6 @@ export default class CachedFilelike implements Filelike {
       if (bytesRead - lastReportedBytesRead > LOGGING_INTERVAL_IN_BYTES) {
         lastReportedBytesRead = bytesRead;
         const sec = (Date.now() - startTime) / 1000;
-        if (this._fileReader.recordBytesPerSecond) {
-          this._fileReader.recordBytesPerSecond(bytesRead / sec);
-        }
 
         const mibibytes = bytesToMiB(bytesRead);
         const speed = round(mibibytes / sec, 2);

@@ -7,6 +7,7 @@
 //  You may not use this file except in compliance with the License.
 
 import { without } from "lodash";
+import { type RosMsgField } from "rosbag";
 
 import baseDatatypes from "webviz-core/src/players/UserNodePlayer/nodeTransformerWorker/typescript/baseDatatypes";
 import {
@@ -20,12 +21,14 @@ import {
   preferArrayLiteral,
   classError,
   noTypeOfError,
+  noMappedTypes,
   noTuples,
   limitedUnionsError,
   noNestedAny,
+  noNestedArrays,
 } from "webviz-core/src/players/UserNodePlayer/nodeTransformerWorker/typescript/errors";
 import { DiagnosticSeverity, Sources, ErrorCodes, type Diagnostic } from "webviz-core/src/players/UserNodePlayer/types";
-import type { RosDatatypes, RosMsgField } from "webviz-core/src/types/RosDatatypes";
+import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 
 // Typescript is required since the `import` syntax breaks VSCode, presumably
 // because VSCode has Typescript built in and our import is conflicting with
@@ -109,6 +112,10 @@ const buildTypeMapFromArgs = (typeArguments: ts.TypeNode[] = [], typeMap: TypeMa
     newTypeParamMap[i] = { current, parent };
   });
   return newTypeParamMap;
+};
+
+const isNodeFromRosModule = (node: ts.SyntaxKind.TypeLiteral | ts.SyntaxKind.InterfaceDeclaration): boolean => {
+  return node.getSourceFile().fileName.endsWith("ros/index.d.ts");
 };
 
 export const findDefaultExportFunction = (source: ts.SourceFile, checker: ts.TypeChecker): ts.Node => {
@@ -223,6 +230,9 @@ export const findReturnType = (
     case ts.SyntaxKind.TypeQuery:
       throw new DatatypeExtractionError(noTypeOfError);
 
+    case ts.SyntaxKind.MappedType:
+      throw new DatatypeExtractionError(noMappedTypes);
+
     case ts.SyntaxKind.AnyKeyword:
     case ts.SyntaxKind.LiteralType: {
       throw new DatatypeExtractionError(badTypeReturnError);
@@ -260,9 +270,8 @@ export const constructDatatypes = (
   // definition, we can check whether it exists in the 'ros' module and just
   // return the ros-specific definition, e.g. 'std_msgs/ColorRGBA', instead of
   // our own definition. This allows user nodes to operate much more freely.
-  const sourceFile = node.getSourceFile();
   const interfaceName = node?.name?.text;
-  if (sourceFile.fileName.endsWith("ros/index.d.ts") && messageDefinitionMap[interfaceName]) {
+  if (isNodeFromRosModule(node) && messageDefinitionMap[interfaceName]) {
     return {
       outputDatatype: messageDefinitionMap[interfaceName],
       datatypes: baseDatatypes,
@@ -307,7 +316,23 @@ export const constructDatatypes = (
     switch (tsNode.kind) {
       case ts.SyntaxKind.InterfaceDeclaration:
       case ts.SyntaxKind.TypeLiteral: {
-        const nestedType = `${currentDatatype}/${name}`;
+        const symbolName = tsNode.symbol.name;
+
+        // The 'json' type is special because rosbagjs represents it as a primitive field
+        if (isNodeFromRosModule(tsNode) && symbolName === "json") {
+          return {
+            name,
+            type: "json",
+            isArray: false,
+            isComplex: false,
+            arrayLength: undefined,
+          };
+        }
+
+        const nestedType =
+          isNodeFromRosModule(tsNode) && messageDefinitionMap[symbolName]
+            ? messageDefinitionMap[symbolName]
+            : `${currentDatatype}/${name}`;
         const { datatypes: nestedDatatypes } = constructDatatypes(
           checker,
           tsNode,
@@ -316,8 +341,8 @@ export const constructDatatypes = (
           depth + 1,
           tsNode.typeParameters ? buildTypeMapFromParams(tsNode.typeParameters, typeMap) : typeMap
         );
-        const childFields = nestedDatatypes[nestedType].fields;
-        if (childFields.length === 2) {
+        const childFields = nestedDatatypes[nestedType]?.fields;
+        if (childFields?.length === 2) {
           const secField = childFields.find((field) => field.name === "sec");
           const nsecField = childFields.find((field) => field.name === "nsec");
           if (
@@ -352,7 +377,11 @@ export const constructDatatypes = (
       }
 
       case ts.SyntaxKind.ArrayType: {
-        return getRosMsgField(name, tsNode.elementType, true, true, typeMap, innerDepth + 1);
+        if (isArray) {
+          throw new DatatypeExtractionError(noNestedArrays);
+        }
+
+        return getRosMsgField(name, tsNode.elementType, true, isComplex, typeMap, innerDepth + 1);
       }
 
       case ts.SyntaxKind.NumberKeyword:

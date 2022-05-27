@@ -37,6 +37,7 @@ type ConstructorArgs = {
   cameraState: CameraState,
   defaultCameraState?: CameraState,
   onCameraStateChange: ?(CameraState) => void,
+  contextAttributes?: ?{ [string]: any },
 };
 
 type InitializedData = {
@@ -83,6 +84,7 @@ export class WorldviewContext {
   _compiled: Map<Function, CompiledReglCommand<any>> = new Map();
   _drawCalls: Map<React.Component<any>, DrawInput> = new Map();
   _frame: ?AnimationFrameID;
+  _needsPaint = false;
   _paintCalls: Map<PaintFn, PaintFn> = new Map();
   _hitmapObjectIdManager: HitmapObjectIdManager = new HitmapObjectIdManager();
   _cachedReadHitmapCall: ?{
@@ -98,11 +100,19 @@ export class WorldviewContext {
   canvasBackgroundColor: Vec4 = [0, 0, 0, 1];
   // group all initialized data together so it can be checked for existence to verify initialization is complete
   initializedData: ?InitializedData;
+  contextAttributes: ?{ [string]: any };
 
-  constructor({ dimension, canvasBackgroundColor, cameraState, onCameraStateChange }: ConstructorArgs) {
+  constructor({
+    dimension,
+    canvasBackgroundColor,
+    cameraState,
+    onCameraStateChange,
+    contextAttributes,
+  }: ConstructorArgs) {
     // used for children to call paint() directly
     this.dimension = dimension;
     this.canvasBackgroundColor = canvasBackgroundColor;
+    this.contextAttributes = contextAttributes;
     this.cameraStore = new CameraStore((cameraState: CameraState) => {
       if (onCameraStateChange) {
         onCameraStateChange(cameraState);
@@ -121,6 +131,7 @@ export class WorldviewContext {
     const regl = this._instrumentCommands(
       createREGL({
         canvas,
+        attributes: this.contextAttributes || {},
         extensions: [
           "angle_instanced_arrays",
           "oes_texture_float",
@@ -130,6 +141,11 @@ export class WorldviewContext {
         profile: getNodeEnv() !== "production",
       })
     );
+
+    if (!regl) {
+      throw new Error("Cannot initialize regl");
+    }
+
     // compile any components which mounted before regl is initialized
     this._commands.forEach((uncompiledCommand) => {
       const compiledCommand = compile(regl, uncompiledCommand);
@@ -223,6 +239,7 @@ export class WorldviewContext {
   }
 
   _paint() {
+    this._needsPaint = false;
     const start = Date.now();
     this.reglCommandObjects.forEach((cmd) => (cmd.stats.count = 0));
     if (!this.initializedData) {
@@ -241,12 +258,20 @@ export class WorldviewContext {
       paintCall();
     });
     this.counters.render = Date.now() - start;
-    this._frame = undefined;
+    // More React state updates may have happened while we were painting, since paint happens
+    // outside the normal React render flow. If this is the case, we need to paint again.
+    if (this._needsPaint) {
+      this._frame = requestAnimationFrame(() => this.paint());
+    } else {
+      this._frame = undefined;
+    }
   }
 
   onDirty = () => {
     if (undefined === this._frame) {
       this._frame = requestAnimationFrame(() => this.paint());
+    } else {
+      this._needsPaint = true;
     }
   };
 

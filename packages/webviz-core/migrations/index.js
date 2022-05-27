@@ -37,6 +37,20 @@ const migrationsByVersion = {
     require("webviz-core/migrations/frozenMigrations/2020.07.07.11:17:28.prefixCollapsedSectionsWithDiagnosticName.js")
       .default,
   ],
+  "010": [],
+  "011": [],
+  "012": [],
+  "013": [
+    require("webviz-core/migrations/frozenMigrations/2020.10.22.14:44:54.removeEmptyDiagnosticsConfigNames.js").default,
+  ],
+  "014": [],
+  "015": [
+    require("webviz-core/migrations/frozenMigrations/2020.11.02.14:16:21.migrateColorToOverrideColor.js").default,
+  ],
+  "016": [],
+  "017": [],
+  "018": [],
+  "019": [],
 };
 
 export default function migratePanels(originalPanelsState: any): any {

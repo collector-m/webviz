@@ -8,12 +8,18 @@
 
 import { type Time } from "rosbag";
 
-import { type ExtensionPoint, type InitializationResult, type DataProvider } from "webviz-core/src/dataProviders/types";
-import { type Message, type Topic } from "webviz-core/src/players/types";
+import type {
+  ExtensionPoint,
+  InitializationResult,
+  DataProvider,
+  GetMessagesResult,
+  GetMessagesTopics,
+} from "webviz-core/src/dataProviders/types";
+import type { Topic } from "webviz-core/src/players/types";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 
-const defaultStart = { sec: 10, nsec: 0 };
-const defaultEnd = { sec: 100, nsec: 0 };
+export const defaultStart = { sec: 10, nsec: 0 };
+export const defaultEnd = { sec: 100, nsec: 0 };
 const datatypes: RosDatatypes = {
   fooBar: {
     fields: [
@@ -33,7 +39,7 @@ const datatypes: RosDatatypes = {
   },
 };
 const defaultTopics: Topic[] = [{ name: "/foo/bar", datatype: "fooBar" }, { name: "/baz", datatype: "baz" }];
-type GetMessages = (start: Time, end: Time, topics: string[]) => Promise<Message[]>;
+type GetMessages = (start: Time, end: Time, topics: GetMessagesTopics) => Promise<GetMessagesResult>;
 
 export default class TestProvider implements DataProvider {
   _start: Time;
@@ -59,13 +65,17 @@ export default class TestProvider implements DataProvider {
       start: this._start,
       end: this._end,
       topics: this._topics,
-      datatypes: this._datatypes,
       providesParsedMessages: true,
-      messageDefinitionsByTopic: {},
+      messageDefinitions: {
+        type: "parsed",
+        datatypes: this._datatypes,
+        messageDefinitionsByTopic: {},
+        parsedMessageDefinitionsByTopic: {},
+      },
     });
   }
 
-  getMessages: GetMessages = (_start: Time, _end: Time, _topics: string[]): Promise<Message[]> => {
+  getMessages: GetMessages = (_start: Time, _end: Time, _topics: GetMessagesTopics): Promise<GetMessagesResult> => {
     throw new Error("not implemented");
   };
 

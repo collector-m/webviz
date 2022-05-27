@@ -11,6 +11,10 @@ import * as React from "react";
 import { Worldview, DEFAULT_CAMERA_STATE, type Color } from "regl-worldview";
 
 import PoseMarkers from "./PoseMarkers";
+import { MockMessagePipelineProvider } from "webviz-core/src/components/MessagePipeline";
+import MockPanelContextProvider from "webviz-core/src/components/MockPanelContextProvider";
+import { getGlobalHooks } from "webviz-core/src/loadWebviz";
+import WorldContext from "webviz-core/src/panels/ThreeDimensionalViz/WorldContext";
 
 const MARKER_DATA = {
   header: { seq: 26967, stamp: { sec: 1516929048, nsec: 413347495 }, frame_id: "" },
@@ -20,10 +24,32 @@ const MARKER_DATA = {
   },
   scale: { x: 1, y: 1, z: 1 },
   color: { r: 1, g: 1, b: 1, a: 0.5 },
-  settings: { color: undefined },
+  settings: { overrideColor: undefined },
 };
 const targetPosition = MARKER_DATA.pose.position;
 const targetOffset = [targetPosition.x, targetPosition.y, targetPosition.z];
+
+const scaling = {
+  originalScaling: { x: 1, y: 1 },
+  updatedScaling: { x: 1, y: 1 },
+};
+
+const AddWorldContext = (props) => (
+  <WorldContext.Provider
+    value={getGlobalHooks()
+      .perPanelHooks()
+      .ThreeDimensionalViz.useWorldContextValue()}>
+    {props.children}
+  </WorldContext.Provider>
+);
+
+const Context = (props) => (
+  <MockMessagePipelineProvider>
+    <MockPanelContextProvider>
+      <AddWorldContext>{props.children}</AddWorldContext>
+    </MockPanelContextProvider>
+  </MockMessagePipelineProvider>
+);
 
 function Example({ alpha = 0.3, color = { r: 0.2, g: 0.59, b: 0.2, a: 0.3 } }: { alpha?: number, color?: Color }) {
   const marker = MARKER_DATA;
@@ -43,7 +69,7 @@ function Example({ alpha = 0.3, color = { r: 0.2, g: 0.59, b: 0.2, a: 0.3 } }: {
       orientation: { x: -0.9928242172830276, y: 0, z: 0, w: 0.11958291506876588 },
     },
     settings: {
-      color,
+      overrideColor: color,
       size: {
         shaftWidth: 0.5,
         headWidth: 2,
@@ -58,22 +84,24 @@ function Example({ alpha = 0.3, color = { r: 0.2, g: 0.59, b: 0.2, a: 0.3 } }: {
       orientation: { x: 0, y: 0, z: -0.9928242172830276, w: 0.11958291506876588 },
     },
     settings: {
-      useCarModel: true,
+      modelType: "car-model",
       alpha,
     },
   };
 
   return (
-    <Worldview
-      defaultCameraState={{ ...DEFAULT_CAMERA_STATE, distance: 50, targetOffset, perspective: false }}
-      cameraMode="perspective"
-      hideDebug>
-      <PoseMarkers>{[marker, markerWithoutColor, markerWithSettings, markerWithCarModel]}</PoseMarkers>
-    </Worldview>
+    <Context>
+      <Worldview
+        defaultCameraState={{ ...DEFAULT_CAMERA_STATE, distance: 50, targetOffset, perspective: false }}
+        cameraMode="perspective"
+        hideDebug>
+        <PoseMarkers {...scaling}>{[marker, markerWithoutColor, markerWithSettings, markerWithCarModel]}</PoseMarkers>
+      </Worldview>
+    </Context>
   );
 }
 
-storiesOf("<3DViz> / PoseMarkers", module)
+storiesOf("<3DViz> / PoseMarkers / webviz-core", module)
   .addParameters({
     screenshot: {
       delay: 3000,

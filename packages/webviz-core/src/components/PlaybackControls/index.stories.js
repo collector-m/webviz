@@ -32,6 +32,7 @@ function getPlayerState(): PlayerState {
     playerId: "1",
     activeData: {
       messages: [],
+      bobjects: [],
       messageOrder: "receiveTime",
       startTime: { sec: START_TIME, nsec: 331 },
       endTime: { sec: START_TIME + 20, nsec: 331 },
@@ -41,8 +42,9 @@ function getPlayerState(): PlayerState {
       lastSeekTime: 0,
       topics: [{ name: "/empty_topic", datatype: "VoidType" }],
       datatypes: { VoidType: { fields: [] } },
-      messageDefinitionsByTopic: {},
+      parsedMessageDefinitionsByTopic: {},
       playerWarnings: {},
+      totalBytesReceived: 1234,
     },
   };
   return player;
@@ -59,7 +61,7 @@ function Wrapper({
 }) {
   return (
     <MockMessagePipelineProvider capabilities={["setSpeed"]} store={store} activeData={activeData}>
-      <div style={{ padding: 20, margin: 100 }}>{children}</div>
+      <div style={{ padding: 32, margin: 32 }}>{children}</div>
     </MockMessagePipelineProvider>
   );
 }

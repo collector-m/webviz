@@ -9,6 +9,7 @@
 // All message types supported by Rviz
 // http://wiki.ros.org/rviz/DisplayTypes
 
+import type { RGBA } from "regl-worldview";
 import type { Time } from "rosbag";
 
 export type Namespace = $ReadOnly<{|
@@ -105,13 +106,13 @@ type Colors = $ReadOnlyArray<Color>;
 export type BaseMarker = $ReadOnly<
   StampedMessage & {
     ns: string,
-    id: string,
+    id: string | number, // TODO: Actually just a number
     action: 0 | 1 | 2 | 3,
     pose: Pose,
     scale: Scale,
     color?: Color,
     colors?: Colors,
-    lifetime?: Time, // TODO: required
+    lifetime?: ?Time,
     frame_locked?: boolean, // TODO: required
     text?: string,
     mesh_resource?: string, // TODO: required
@@ -139,6 +140,23 @@ export type ArrowMarker = $ReadOnly<
     // used for hard-coded arrows with geometry_msgs/PoseStamped
     // not part of the original ros message
     size?: ArrowSize,
+  }
+>;
+
+export type IconTypeItem = {| icon_type: number | string, color?: RGBA |};
+export type IconMetadata = {
+  id?: number,
+  icon_type?: string, // Deprecated, use icon_types instead
+  icon_types?: IconTypeItem[],
+  iconOffset?: { x: number, y: number },
+  markerStyle?: { [attr: string]: string | number },
+};
+export type OverlayIconMarker = $ReadOnly<
+  BaseMarker & {
+    type: 109,
+    text: string,
+    icon_type?: string,
+    metadata: IconMetadata,
   }
 >;
 
@@ -334,7 +352,7 @@ export type ImageMarker = $ReadOnly<{|
   header: Header,
   ns: string,
   id: number,
-  type: 0 | 1 | 2 | 3 | 4 | 5,
+  type: 0 | 1 | 2 | 3 | 4 | 5 | 109,
   action: 0 | 1,
   position: Point,
   scale: number,
@@ -377,4 +395,41 @@ export type MapMetaData = $ReadOnly<{|
   width: number,
   height: number,
   origin: Pose,
+|}>;
+
+export type Icon2dMarker = $ReadOnly<{|
+  ...ImageMarker,
+  text: string,
+  type: 109,
+  icon_type: number,
+  metadata?: $ReadOnly<any>,
+|}>;
+
+export type Icon2dMarkersMessage = $ReadOnly<{
+  header: Header,
+  markers: Icon2dMarker[],
+}>;
+export type Icon3dMarkersMessage = $ReadOnly<{
+  header: Header,
+  markers: OverlayIconMarker[],
+}>;
+
+type RadarPoint = $ReadOnly<{
+  // Incomplete: more fields available for selecting a "channel" color in the 3D panel.
+  range: number,
+  radial_vel: number,
+  elevation_angle: number,
+  azimuth_angle_0: number,
+}>;
+
+// Incomplete.
+export type RadarPointCluster = $ReadOnly<{
+  header: Header,
+  points: RadarPoint[],
+}>;
+
+export type WebvizTickProps = $ReadOnly<{|
+  stamp: Time,
+  text: string, // markdown
+  color: Color,
 |}>;

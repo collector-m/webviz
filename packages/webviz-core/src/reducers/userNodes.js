@@ -12,16 +12,15 @@ import type { State } from "webviz-core/src/reducers";
 export type UserNodeDiagnostics = {
   diagnostics: Diagnostic[],
   logs: UserNodeLog[],
-  trusted: boolean, // Security flag that indicates whether we should populate a dialogue box.
 };
 
 export default function userNodes(state: State, action: ActionTypes): State {
   switch (action.type) {
     case "SET_USER_NODE_DIAGNOSTICS": {
       const userNodeDiagnostics = { ...state.userNodes.userNodeDiagnostics };
-      Object.keys(action.payload).forEach((nodeId) => {
-        const payloadDiagnostics = action.payload[nodeId].diagnostics;
-        if (action.payload[nodeId] === undefined) {
+      Object.keys(action.payload.diagnostics).forEach((nodeId) => {
+        const payloadDiagnostics = action.payload.diagnostics[nodeId].diagnostics;
+        if (action.payload.diagnostics[nodeId] === undefined) {
           delete userNodeDiagnostics[nodeId];
         } else if (!userNodeDiagnostics[nodeId]) {
           userNodeDiagnostics[nodeId] = { diagnostics: payloadDiagnostics, logs: [] };
@@ -54,13 +53,6 @@ export default function userNodes(state: State, action: ActionTypes): State {
       if (userNodeDiagnostics[nodeId]) {
         userNodeDiagnostics[nodeId] = { ...userNodeDiagnostics[nodeId], logs: [] };
       }
-      return { ...state, userNodes: { ...state.userNodes, userNodeDiagnostics } };
-    }
-
-    case "SET_USER_NODE_TRUST": {
-      const userNodeDiagnostics = { ...state.userNodes.userNodeDiagnostics };
-      const { id, trusted } = action.payload;
-      userNodeDiagnostics[id] = { logs: [], diagnostics: [], ...userNodeDiagnostics[id], trusted };
       return { ...state, userNodes: { ...state.userNodes, userNodeDiagnostics } };
     }
 

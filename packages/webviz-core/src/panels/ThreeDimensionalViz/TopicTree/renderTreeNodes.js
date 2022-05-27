@@ -11,6 +11,7 @@ import React, { type Node } from "react";
 import styled from "styled-components";
 
 import renderNamespaceNodes, { type NamespaceNode } from "./renderNamespaceNodes";
+import { renderStyleExpressionNodes } from "./renderStyleExpressionNodes";
 import TreeNodeRow from "./TreeNodeRow";
 import type {
   DerivedCustomSettingsByKey,
@@ -27,11 +28,13 @@ import type {
   TreeTopicNode,
   VisibleTopicsCountByKey,
 } from "./types";
-import { generateNodeKey } from "./useTopicTree";
 import filterMap from "webviz-core/src/filterMap";
+import type { LinkedGlobalVariable } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/useLinkedGlobalVariables";
 import { canEditNamespaceOverrideColorDatatype } from "webviz-core/src/panels/ThreeDimensionalViz/TopicSettingsEditor/index";
+import generateNodeKey from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/generateNodeKey";
 import { TOPIC_DISPLAY_MODES } from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/TopicViewModeSelector";
-import { SECOND_SOURCE_PREFIX } from "webviz-core/src/util/globalConstants";
+import type { StructuralDatatypes } from "webviz-core/src/panels/ThreeDimensionalViz/utils/datatypes";
+import { $WEBVIZ_SOURCE_2 } from "webviz-core/src/util/globalConstants";
 import naturalSort from "webviz-core/src/util/naturalSort";
 import { colors } from "webviz-core/src/util/sharedStyleConstants";
 
@@ -91,9 +94,12 @@ type Props = {|
   sceneErrorsByKey: SceneErrorsByKey,
   setCurrentEditingTopic: SetCurrentEditingTopic,
   setEditingNamespace: SetEditingNamespace,
+  structuralDatatypes: StructuralDatatypes,
   topicDisplayMode: TopicDisplayMode,
   visibleTopicsCountByKey: VisibleTopicsCountByKey,
   width: number,
+  linkedGlobalVariablesByTopic: { [string]: LinkedGlobalVariable[] },
+  diffModeEnabled: boolean,
 |};
 
 export type TreeUINode = {| title: Node, key: string, children?: TreeUINode[], disabled?: boolean |};
@@ -122,7 +128,7 @@ export function getNamespaceNodes({
   const topicName = node.topicName;
   const baseNamespacesSet = new Set((topicName && availableNamespacesByTopic[topicName]) || []);
   const featureNamespacesSet = new Set(
-    (topicName && hasFeatureColumn && availableNamespacesByTopic[`${SECOND_SOURCE_PREFIX}${topicName}`]) || []
+    (topicName && hasFeatureColumn && availableNamespacesByTopic[`${$WEBVIZ_SOURCE_2}${topicName}`]) || []
   );
   const uniqueNamespaces = uniq([...Array.from(baseNamespacesSet), ...Array.from(featureNamespacesSet)]);
   const columns = hasFeatureColumn ? [0, 1] : [0];
@@ -190,9 +196,12 @@ export default function renderTreeNodes({
   sceneErrorsByKey,
   setCurrentEditingTopic,
   setEditingNamespace,
+  structuralDatatypes,
   topicDisplayMode,
   visibleTopicsCountByKey,
   width,
+  linkedGlobalVariablesByTopic,
+  diffModeEnabled,
 }: Props): TreeUINode[] {
   const titleWidth = width - SWITCHER_WIDTH;
   return children
@@ -222,7 +231,9 @@ export default function renderTreeNodes({
         item.type === "topic"
           ? getNamespaceNodes({
               availableNamespacesByTopic,
-              canEditNamespaceOverrideColor: !!(datatype && canEditNamespaceOverrideColorDatatype(datatype)),
+              canEditNamespaceOverrideColor: !!(
+                datatype && canEditNamespaceOverrideColorDatatype(datatype, structuralDatatypes)
+              ),
               checkedKeysSet,
               derivedCustomSettingsByKey,
               getIsNamespaceCheckedByDefault,
@@ -274,15 +285,28 @@ export default function renderTreeNodes({
           nodeVisibleInScene={nodeVisibleInScene}
           sceneErrors={sceneErrorsByKey[item.key]}
           setCurrentEditingTopic={setCurrentEditingTopic}
+          structuralDatatypes={structuralDatatypes}
           visibleByColumn={visibleByColumn}
           width={titleWidth}
           visibleTopicsCount={visibleTopicsCountByKey[item.key] || 0}
           {...(tooltips.length ? { tooltips } : undefined)}
+          diffModeEnabled={diffModeEnabled}
         />
       );
 
       const childrenNodes = [];
-      if (item.type === "topic" && namespaceNodes.length > 0) {
+      if (item.type === "topic") {
+        childrenNodes.push(
+          ...renderStyleExpressionNodes({
+            isXSWidth,
+            topicName,
+            hasFeatureColumn,
+            linkedGlobalVariablesByTopic,
+            visible: nodeVisibleInScene,
+            width: titleWidth,
+          })
+        );
+
         childrenNodes.push(
           ...renderNamespaceNodes({
             children: namespaceNodes.sort(naturalSort("namespace")),
@@ -294,6 +318,7 @@ export default function renderTreeNodes({
             topicNode: item,
             width: titleWidth,
             filterText,
+            diffModeEnabled,
           })
         );
       }
@@ -313,10 +338,13 @@ export default function renderTreeNodes({
             topicDisplayMode,
             sceneErrorsByKey,
             setCurrentEditingTopic,
+            structuralDatatypes,
             derivedCustomSettingsByKey,
             visibleTopicsCountByKey,
             width: titleWidth,
             filterText,
+            linkedGlobalVariablesByTopic,
+            diffModeEnabled,
           })
         );
       }

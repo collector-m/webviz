@@ -10,45 +10,37 @@ import cx from "classnames";
 import React, { useMemo } from "react";
 import { PolygonBuilder, type MouseEventObject, type Polygon } from "regl-worldview";
 
-import { useExperimentalFeature } from "webviz-core/src/components/ExperimentalFeatures";
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import CameraInfo from "webviz-core/src/panels/ThreeDimensionalViz/CameraInfo";
-import Crosshair from "webviz-core/src/panels/ThreeDimensionalViz/Crosshair";
 import DrawingTools, { type DrawingTabType } from "webviz-core/src/panels/ThreeDimensionalViz/DrawingTools";
 import MeasuringTool, { type MeasureInfo } from "webviz-core/src/panels/ThreeDimensionalViz/DrawingTools/MeasuringTool";
 import FollowTFControl from "webviz-core/src/panels/ThreeDimensionalViz/FollowTFControl";
-import GlobalVariableStyles from "webviz-core/src/panels/ThreeDimensionalViz/GlobalVariableStyles";
-import Interactions, { type InteractionData } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions";
+import Interactions from "webviz-core/src/panels/ThreeDimensionalViz/Interactions";
+import type { TabType } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/Interactions";
+import { type LayoutToolbarSharedProps } from "webviz-core/src/panels/ThreeDimensionalViz/Layout";
 import styles from "webviz-core/src/panels/ThreeDimensionalViz/Layout.module.scss";
 import MainToolbar from "webviz-core/src/panels/ThreeDimensionalViz/MainToolbar";
-import MeasureMarker from "webviz-core/src/panels/ThreeDimensionalViz/MeasureMarker";
 import SearchText, { type SearchTextProps } from "webviz-core/src/panels/ThreeDimensionalViz/SearchText";
-import {
-  type ColorOverridesByGlobalVariableName,
-  type LayoutToolbarSharedProps,
-} from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/Layout";
 
 type Props = {|
   ...LayoutToolbarSharedProps,
   autoSyncCameraState: boolean,
   debug: boolean,
-  isDrawing: boolean,
-  interactionData: ?InteractionData,
+  interactionsTabType: ?TabType,
   measureInfo: MeasureInfo,
   measuringElRef: { current: ?MeasuringTool },
-  onClearSelectedObject: () => void,
-  setMeasureInfo: (MeasureInfo) => void,
   onSetDrawingTabType: (?DrawingTabType) => void,
   onSetPolygons: (polygons: Polygon[]) => void,
   onToggleCameraMode: () => void,
   onToggleDebug: () => void,
   polygonBuilder: PolygonBuilder,
-  rootTf: ?string,
   selectedObject: ?MouseEventObject,
   selectedPolygonEditFormat: "json" | "yaml",
+  setInteractionsTabType: (?TabType) => void,
+  setMeasureInfo: (MeasureInfo) => void,
   showCrosshair: ?boolean,
-  colorOverridesByGlobalVariable: ColorOverridesByGlobalVariableName,
-  setColorOverridesByGlobalVariable: (ColorOverridesByGlobalVariableName) => void,
+  isHidden: boolean,
+  findTopicInTopicTree: (string) => void,
   ...SearchTextProps,
 |};
 
@@ -56,56 +48,51 @@ function LayoutToolbar({
   autoSyncCameraState,
   cameraState,
   debug,
-  isDrawing,
   followOrientation,
   followTf,
-  interactionData,
+  interactionsTabType,
   isPlaying,
   measureInfo,
   measuringElRef,
   onAlignXYAxis,
   onCameraStateChange,
-  onClearSelectedObject,
   onFollowChange,
-  setMeasureInfo,
   onSetDrawingTabType,
   onSetPolygons,
   onToggleCameraMode,
   onToggleDebug,
   polygonBuilder,
-  rootTf,
   saveConfig,
   searchInputRef,
   searchText,
   searchTextMatches,
   searchTextOpen,
+  searchTextWithInlinedVariables,
   selectedMatchIndex,
   selectedObject,
   selectedPolygonEditFormat,
+  findTopicInTopicTree,
+  setInteractionsTabType,
+  setMeasureInfo,
   setSearchText,
   setSearchTextMatches,
   setSelectedMatchIndex,
   showCrosshair,
+  isHidden,
   targetPose,
   toggleSearchTextOpen,
   transforms,
-  colorOverridesByGlobalVariable,
-  setColorOverridesByGlobalVariable,
 }: Props) {
-  const additionalToolbarItemsElem = useMemo(
-    () => {
-      const AdditionalToolbarItems = getGlobalHooks().perPanelHooks().ThreeDimensionalViz.AdditionalToolbarItems;
-      return (
-        <div className={cx(styles.buttons, styles.cartographer)}>
-          <AdditionalToolbarItems transforms={transforms} />
-        </div>
-      );
-    },
-    [transforms]
-  );
-  const highlightMarkersThatMatchGlobalVariables = useExperimentalFeature("highlightGlobalVariableMatchingMarkers");
+  const additionalToolbarItemsElem = useMemo(() => {
+    const AdditionalToolbarItems = getGlobalHooks().perPanelHooks().ThreeDimensionalViz.AdditionalToolbarItems;
+    return (
+      <div className={cx(styles.buttons, styles.cartographer)}>
+        <AdditionalToolbarItems transforms={transforms} />
+      </div>
+    );
+  }, [transforms]);
 
-  return (
+  return isHidden ? null : (
     <>
       <MeasuringTool
         ref={measuringElRef}
@@ -118,6 +105,7 @@ function LayoutToolbar({
           <SearchText
             searchTextOpen={searchTextOpen}
             toggleSearchTextOpen={toggleSearchTextOpen}
+            searchTextWithInlinedVariables={searchTextWithInlinedVariables}
             searchText={searchText}
             setSearchText={setSearchText}
             setSearchTextMatches={setSearchTextMatches}
@@ -125,11 +113,6 @@ function LayoutToolbar({
             searchInputRef={searchInputRef}
             setSelectedMatchIndex={setSelectedMatchIndex}
             selectedMatchIndex={selectedMatchIndex}
-            onCameraStateChange={onCameraStateChange}
-            cameraState={cameraState}
-            transforms={transforms}
-            rootTf={rootTf}
-            onFollowChange={onFollowChange}
           />
         </div>
         <div className={styles.buttons}>
@@ -149,17 +132,11 @@ function LayoutToolbar({
           onToggleDebug={onToggleDebug}
         />
         {measuringElRef.current && measuringElRef.current.measureDistance}
-        {highlightMarkersThatMatchGlobalVariables && (
-          <GlobalVariableStyles
-            colorOverridesByGlobalVariable={colorOverridesByGlobalVariable}
-            setColorOverridesByGlobalVariable={setColorOverridesByGlobalVariable}
-          />
-        )}
         <Interactions
-          isDrawing={isDrawing}
-          interactionData={interactionData}
-          onClearSelectedObject={onClearSelectedObject}
+          findTopicInTopicTree={findTopicInTopicTree}
           selectedObject={selectedObject}
+          interactionsTabType={interactionsTabType}
+          setInteractionsTabType={setInteractionsTabType}
         />
         <DrawingTools
           onSetPolygons={onSetPolygons}
@@ -181,8 +158,6 @@ function LayoutToolbar({
         />
         {additionalToolbarItemsElem}
       </div>
-      {!cameraState.perspective && showCrosshair && <Crosshair cameraState={cameraState} />}
-      <MeasureMarker measurePoints={measureInfo.measurePoints} />
     </>
   );
 }

@@ -1,15 +1,16 @@
 // @flow
 //
-//  Copyright (c) 2018-present, Cruise LLC
+//  Copyright (c) 2020-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
-
-import { push } from "connected-react-router";
 import type { MosaicDropTargetPosition, MosaicPath } from "react-mosaic-component";
 
+import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import { type LinkedGlobalVariables } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/useLinkedGlobalVariables";
+import type { Dispatcher } from "webviz-core/src/reducers";
+import { type PanelsState } from "webviz-core/src/reducers/panels";
 import type { TabLocation } from "webviz-core/src/types/layouts";
 import type {
   CreateTabPanelPayload,
@@ -22,11 +23,12 @@ import type {
   MosaicNode,
   SavedProps,
   PanelConfig,
+  SetFetchedLayoutPayload,
 } from "webviz-core/src/types/panels";
-import type { Dispatch, GetState } from "webviz-core/src/types/Store";
-import { LAYOUT_QUERY_KEY } from "webviz-core/src/util/globalConstants";
+import { LAYOUT_URL_QUERY_KEY, PATCH_QUERY_KEY } from "webviz-core/src/util/globalConstants";
+import { applyPatchToLayout } from "webviz-core/src/util/layout/patch";
 
-const PANELS_ACTION_TYPES = {
+export const PANELS_ACTION_TYPES = {
   CHANGE_PANEL_LAYOUT: "CHANGE_PANEL_LAYOUT",
   IMPORT_PANEL_LAYOUT: "IMPORT_PANEL_LAYOUT",
   SAVE_PANEL_CONFIGS: "SAVE_PANEL_CONFIGS",
@@ -45,37 +47,27 @@ const PANELS_ACTION_TYPES = {
   DROP_PANEL: "DROP_PANEL",
   START_DRAG: "START_DRAG",
   END_DRAG: "END_DRAG",
+  SET_FETCHED_LAYOUT: "SET_FETCHED_LAYOUT",
+  SET_FETCH_LAYOUT_FAILED: "SET_FETCH_LAYOUT_FAILED",
+  LOAD_LAYOUT: "LOAD_LAYOUT",
+  CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT: "CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT",
+  SET_FULL_SCREEN_PANEL: "SET_FULL_SCREEN_PANEL",
+  CLEAR_FULL_SCREEN_PANEL: "CLEAR_FULL_SCREEN_PANEL",
 };
 
 export type SAVE_PANEL_CONFIGS = { type: "SAVE_PANEL_CONFIGS", payload: SaveConfigsPayload };
 export type SAVE_FULL_PANEL_CONFIG = { type: "SAVE_FULL_PANEL_CONFIG", payload: SaveFullConfigPayload };
 export type CREATE_TAB_PANEL = { type: "CREATE_TAB_PANEL", payload: CreateTabPanelPayload };
 export type CHANGE_PANEL_LAYOUT = { type: "CHANGE_PANEL_LAYOUT", payload: ChangePanelLayoutPayload };
-export type Dispatcher<T> = (dispatch: Dispatch, getState: GetState) => T;
+type LOAD_LAYOUT = { type: "LOAD_LAYOUT", payload: PanelsState };
 
-function maybeStripLayoutId(dispatch: Dispatch, getState: GetState): void {
-  const state = getState();
-  const { location } = state.router;
+type SET_FETCHED_LAYOUT = { type: "SET_FETCHED_LAYOUT", payload: SetFetchedLayoutPayload };
+type SET_FETCH_LAYOUT_FAILED = { type: "SET_FETCH_LAYOUT_FAILED", payload: Error };
+export const setFetchedLayout = (payload: SetFetchedLayoutPayload): Dispatcher<SET_FETCHED_LAYOUT> => (dispatch) => {
+  return dispatch({ type: PANELS_ACTION_TYPES.SET_FETCHED_LAYOUT, payload });
+};
 
-  if (location) {
-    const params = new URLSearchParams(location.search);
-    if (params.get(LAYOUT_QUERY_KEY)) {
-      params.delete(LAYOUT_QUERY_KEY);
-      const newSearch = params.toString();
-      const searchString = newSearch ? `?${newSearch}` : newSearch;
-      const newPath = `${location.pathname}${searchString}`;
-      dispatch(push(newPath));
-    }
-  }
-}
-
-export const savePanelConfigs = (payload: SaveConfigsPayload): Dispatcher<SAVE_PANEL_CONFIGS> => (
-  dispatch,
-  getState
-) => {
-  if (!payload.silent) {
-    maybeStripLayoutId(dispatch, getState);
-  }
+export const savePanelConfigs = (payload: SaveConfigsPayload): Dispatcher<SAVE_PANEL_CONFIGS> => (dispatch) => {
   return dispatch({ type: PANELS_ACTION_TYPES.SAVE_PANEL_CONFIGS, payload });
 };
 
@@ -93,26 +85,63 @@ export const createTabPanel = (payload: CreateTabPanelPayload): CREATE_TAB_PANEL
 type IMPORT_PANEL_LAYOUT = { type: "IMPORT_PANEL_LAYOUT", payload: ImportPanelLayoutPayload };
 export const importPanelLayout = (
   payload: ImportPanelLayoutPayload,
-  {
-    isFromUrl = false,
-    skipSettingLocalStorage = false,
-  }: { isFromUrl?: boolean, skipSettingLocalStorage?: boolean } = {}
-): Dispatcher<IMPORT_PANEL_LAYOUT> => (dispatch, getState) => {
-  if (!isFromUrl) {
-    maybeStripLayoutId(dispatch, getState);
-  }
+  { skipSettingLocalStorage = false }: { skipSettingLocalStorage?: boolean } = {}
+): Dispatcher<IMPORT_PANEL_LAYOUT> => (dispatch) => {
   return dispatch({
     type: PANELS_ACTION_TYPES.IMPORT_PANEL_LAYOUT,
     payload: skipSettingLocalStorage ? { ...payload, skipSettingLocalStorage } : payload,
   });
 };
 
-export const changePanelLayout = (payload: ChangePanelLayoutPayload): Dispatcher<CHANGE_PANEL_LAYOUT> => (
-  dispatch,
-  getState
-) => {
-  maybeStripLayoutId(dispatch, getState);
+export const changePanelLayout = (payload: ChangePanelLayoutPayload): Dispatcher<CHANGE_PANEL_LAYOUT> => (dispatch) => {
   return dispatch({ type: PANELS_ACTION_TYPES.CHANGE_PANEL_LAYOUT, payload });
+};
+
+export const loadLayout = (layout: PanelsState): Dispatcher<LOAD_LAYOUT> => (dispatch) => {
+  return dispatch({ type: PANELS_ACTION_TYPES.LOAD_LAYOUT, payload: layout });
+};
+
+type CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT = { type: "CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT" };
+export const clearLayoutUrlReplacedByDefault = (): Dispatcher<CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT> => (dispatch) => {
+  return dispatch({ type: PANELS_ACTION_TYPES.CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT });
+};
+
+export const fetchLayout = (search: string): Dispatcher<SET_FETCHED_LAYOUT> => (dispatch) => {
+  const params = new URLSearchParams(search);
+  const hasLayoutUrl = params.get(LAYOUT_URL_QUERY_KEY);
+  const patch = params.get(PATCH_QUERY_KEY);
+  dispatch({ type: PANELS_ACTION_TYPES.SET_FETCHED_LAYOUT, payload: { isLoading: true } });
+  return getGlobalHooks()
+    .getLayoutFromUrl(search)
+    .then((layoutFetchResult) => {
+      dispatch({
+        type: PANELS_ACTION_TYPES.SET_FETCHED_LAYOUT,
+        // Omitting `isInitializedFromLocalStorage` whenever we get a new fetched layout.
+        payload: {
+          isLoading: false,
+          data: {
+            ...layoutFetchResult,
+            content: getGlobalHooks().migratePanels(layoutFetchResult.content || layoutFetchResult),
+          },
+          isFromLayoutUrlParam: !!hasLayoutUrl,
+        },
+      });
+      if (layoutFetchResult) {
+        if (hasLayoutUrl) {
+          const patchedLayout = applyPatchToLayout(patch, layoutFetchResult.content || layoutFetchResult);
+          dispatch({ type: PANELS_ACTION_TYPES.LOAD_LAYOUT, payload: patchedLayout });
+        } else if (layoutFetchResult.content) {
+          const patchedLayout = applyPatchToLayout(patch, layoutFetchResult.content);
+          dispatch({
+            type: PANELS_ACTION_TYPES.LOAD_LAYOUT,
+            payload: patchedLayout,
+          });
+        }
+      }
+    })
+    .catch((e) => {
+      dispatch({ type: PANELS_ACTION_TYPES.SET_FETCH_LAYOUT_FAILED, payload: e });
+    });
 };
 
 type OVERWRITE_GLOBAL_DATA = { type: "OVERWRITE_GLOBAL_DATA", payload: { [key: string]: any } };
@@ -239,6 +268,29 @@ export const endDrag = (payload: EndDragPayload): END_DRAG => ({
   payload,
 });
 
+export type SET_FULL_SCREEN_PANEL = $ReadOnly<{|
+  type: "SET_FULL_SCREEN_PANEL",
+  payload: $ReadOnly<{| panelId: string, locked: boolean |}>,
+|}>;
+
+export const setFullScreenPanel = (panelId: string, locked: boolean): SET_FULL_SCREEN_PANEL => ({
+  type: "SET_FULL_SCREEN_PANEL",
+  payload: { panelId, locked },
+});
+
+export type CLEAR_FULL_SCREEN_PANEL = $ReadOnly<{|
+  type: "CLEAR_FULL_SCREEN_PANEL",
+  // Provide panelId so panels don't clear each other's state by mistake. If we ever want to clear
+  // the fullscreen state regardless of who set it, we could make the id optional, or make a new
+  // action.
+  payload: $ReadOnly<{| panelId: string |}>,
+|}>;
+
+export const clearFullScreenPanel = (panelId: string): CLEAR_FULL_SCREEN_PANEL => ({
+  type: "CLEAR_FULL_SCREEN_PANEL",
+  payload: { panelId },
+});
+
 export type PanelsActions =
   | CHANGE_PANEL_LAYOUT
   | IMPORT_PANEL_LAYOUT
@@ -257,7 +309,13 @@ export type PanelsActions =
   | ADD_PANEL
   | DROP_PANEL
   | START_DRAG
-  | END_DRAG;
+  | END_DRAG
+  | SET_FETCHED_LAYOUT
+  | SET_FETCH_LAYOUT_FAILED
+  | LOAD_LAYOUT
+  | CLEAR_LAYOUT_URL_REPLACED_BY_DEFAULT
+  | SET_FULL_SCREEN_PANEL
+  | CLEAR_FULL_SCREEN_PANEL;
 
 type PanelsActionTypes = $Values<typeof PANELS_ACTION_TYPES>;
 export const panelEditingActions = new Set<PanelsActionTypes>(Object.keys(PANELS_ACTION_TYPES));

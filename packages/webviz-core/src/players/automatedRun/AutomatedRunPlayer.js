@@ -6,13 +6,17 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
+import { partition } from "lodash";
 import Queue from "promise-queue";
 import { type Time, TimeUtil } from "rosbag";
 import uuid from "uuid";
 
 import type { DataProvider, DataProviderMetadata, InitializationResult } from "webviz-core/src/dataProviders/types";
+import { BUFFER_DURATION_SECS } from "webviz-core/src/players/OrderedStampPlayer";
+import { SEEK_BACK_NANOSECONDS } from "webviz-core/src/players/RandomAccessPlayer";
 import type {
   AdvertisePayload,
+  BobjectMessage,
   Message,
   Player,
   PlayerState,
@@ -21,46 +25,61 @@ import type {
   SubscribePayload,
   Topic,
 } from "webviz-core/src/players/types";
-import { USER_ERROR_PREFIX } from "webviz-core/src/util/globalConstants";
-import Logger from "webviz-core/src/util/Logger";
 import { getSanitizedTopics } from "webviz-core/src/util/selectors";
-import sendNotification, {
-  type NotificationType,
-  type NotificationSeverity,
-  type DetailsType,
-  detailsToString,
-  setNotificationHandler,
-} from "webviz-core/src/util/sendNotification";
-import { clampTime, subtractTimes, toMillis } from "webviz-core/src/util/time";
+import sendNotification from "webviz-core/src/util/sendNotification";
+import {
+  fromSec,
+  clampTime,
+  subtractTimes,
+  toMillis,
+  fromMillis,
+  formatSeconds,
+  type TimestampMethod,
+} from "webviz-core/src/util/time";
+
+export type VideoMetadata = {|
+  startTimeMs: number, // time of first message in millis (inclusive)
+  endTimeMs: number, // time of last message in millis (inclusive)
+  msPerFrame: number, // millis per frame
+|};
+
+export type RecordingProgressEvent = {| percentComplete: number, etaEpochMs?: number, frameRenderDurationMs?: number |};
 
 export interface AutomatedRunClient {
   speed: number;
   msPerFrame: number;
+  durationMs?: number | typeof undefined;
+  workerIndex?: number;
+  workerTotal?: number;
+  rangeStartTime: any;
+  rangeEndTime: any;
   shouldLoadDataBeforePlaying: boolean;
   onError(any): Promise<void>;
   start({ bagLengthMs: number }): void;
   markTotalFrameStart(): void;
   markTotalFrameEnd(): void;
   markFrameRenderStart(): void;
-  markFrameRenderEnd(): void;
+  markFrameRenderEnd(): number;
   markPreloadStart(): void;
-  markPreloadEnd(): void;
-  onFrameFinished(frameIndex: number): Promise<void>;
-  finish(): any;
+  markPreloadEnd(): number;
+  onFrameFinished(progressEvent: RecordingProgressEvent): Promise<void>;
+  finish(VideoMetadata): any;
 }
 
-export const AUTOMATED_RUN_START_DELAY = process.env.NODE_ENV === "test" ? 10 : 2000;
+export const AUTOMATED_RUN_START_DELAY = process.env.NODE_ENV === "test" ? 10 : 10000;
 const NO_WARNINGS = Object.freeze({});
-
-const logger = new Logger(__filename);
 
 export default class AutomatedRunPlayer implements Player {
   static className = "AutomatedRunPlayer";
   _isPlaying: boolean = false;
   _provider: DataProvider;
+  _startTime: Time;
+  _endTime: Time;
   _providerResult: InitializationResult;
+  _providerTopics: Topic[] = [];
   _progress: Progress;
-  _topics: Set<string> = new Set();
+  _bobjectTopics: Set<string> = new Set();
+  _parsedTopics: Set<string> = new Set();
   _listener: (PlayerState) => Promise<void>;
   _initializeTimeout: TimeoutID;
   _initialized: boolean = false;
@@ -68,9 +87,9 @@ export default class AutomatedRunPlayer implements Player {
   _speed: number;
   _msPerFrame: number;
   _client: AutomatedRunClient;
-  _error: ?Error;
-  _waitToReportErrorPromise: ?Promise<void>;
   _startCalled: boolean = false;
+  _receivedBytes: number = 0;
+  _globalMessageOrder: TimestampMethod = "receiveTime";
   // Calls to this._listener must not happen concurrently, and we want them to happen
   // deterministically so we put them in a FIFO queue.
   _emitStateQueue: Queue = new Queue(1);
@@ -80,62 +99,64 @@ export default class AutomatedRunPlayer implements Player {
     this._speed = client.speed;
     this._msPerFrame = client.msPerFrame;
     this._client = client;
-    // Report errors from sendNotification and those thrown on the window object to the client.
-    setNotificationHandler(
-      (message: string, details: DetailsType, type: NotificationType, severity: NotificationSeverity) => {
-        if (severity === "warn") {
-          // We can ignore warnings in automated runs
-          return;
-        }
-        let error;
-        if (type === "user") {
-          error = new Error(`${USER_ERROR_PREFIX} ${message} // ${detailsToString(details)}`);
-        } else if (type === "app") {
-          error = new Error(`[WEBVIZ APPLICATION ERROR] ${detailsToString(details)}`);
-        } else {
-          (type: void);
-          error = new Error(`Unknown error type! ${type} // ${detailsToString(details)}`);
-        }
-        this._error = error;
-        this._waitToReportErrorPromise = client.onError(error);
-      }
-    );
-    window.addEventListener("error", (e: Error) => {
-      this._error = e;
-      this._waitToReportErrorPromise = client.onError(e);
-    });
   }
 
-  async _getMessages(start: Time, end: Time): Promise<Message[]> {
-    const topics = getSanitizedTopics(this._topics, this._providerResult.topics);
-    if (topics.length === 0) {
-      return [];
+  async _getMessages(
+    start: Time,
+    end: Time
+  ): Promise<{ parsedMessages: $ReadOnlyArray<Message>, bobjects: $ReadOnlyArray<BobjectMessage> }> {
+    const parsedTopics = getSanitizedTopics(this._parsedTopics, this._providerTopics);
+    const bobjectTopics = getSanitizedTopics(this._bobjectTopics, this._providerTopics);
+    if (parsedTopics.length === 0 && bobjectTopics.length === 0) {
+      return { parsedMessages: [], bobjects: [] };
     }
+    // Make sure to clamp the start/end times to the _providerResult or getMessages will throw errors
+    // TODO: Find a better way to share this logic with RandomAccessPlayer.js
     start = clampTime(start, this._providerResult.start, this._providerResult.end);
     end = clampTime(end, this._providerResult.start, this._providerResult.end);
-    const messages = await this._provider.getMessages(start, end, topics);
-    return messages.map((message) => {
-      const topic: ?Topic = this._providerResult.topics.find((t) => t.name === message.topic);
-      if (!topic) {
-        throw new Error(`Could not find topic for message ${message.topic}`);
-      }
-
-      if (!topic.datatype) {
-        throw new Error(`Missing datatype for topic: ${message.topic}`);
-      }
-
-      return {
-        topic: message.topic,
-        receiveTime: message.receiveTime,
-        message: message.message,
-      };
+    const messages = await this._provider.getMessages(start, end, {
+      parsedMessages: parsedTopics,
+      bobjects: bobjectTopics,
     });
+    const { parsedMessages, rosBinaryMessages, bobjects } = messages;
+    if (rosBinaryMessages?.length || bobjects == null || parsedMessages == null) {
+      const messageTypes = Object.keys(messages)
+        .filter((kind) => messages[kind]?.length)
+        .join(",");
+      throw new Error(`Invalid message types: ${messageTypes}`);
+    }
+
+    const filterMessages = (msgs) =>
+      msgs.map((message) => {
+        const topic: ?Topic = this._providerTopics.find((t) => t.name === message.topic);
+        if (!topic) {
+          throw new Error(`Could not find topic for message ${message.topic}`);
+        }
+
+        if (!topic.datatype) {
+          throw new Error(`Missing datatype for topic: ${message.topic}`);
+        }
+        return {
+          topic: message.topic,
+          receiveTime: message.receiveTime,
+          message: message.message,
+        };
+      });
+    return { parsedMessages: filterMessages(parsedMessages), bobjects: filterMessages(bobjects) };
   }
 
-  _emitState(messages: Message[], currentTime: Time): Promise<void> {
+  _emitState(
+    messages: $ReadOnlyArray<Message>,
+    bobjects: $ReadOnlyArray<BobjectMessage>,
+    currentTime: Time
+  ): Promise<void> {
     return this._emitStateQueue.add(async () => {
       if (!this._listener) {
         return;
+      }
+      const initializationResult = this._providerResult;
+      if (!initializationResult.messageDefinitions || initializationResult.messageDefinitions.type === "raw") {
+        throw new Error("AutomatedRunPlayer requires parsed message definitions");
       }
       return this._listener({
         isPresent: true,
@@ -146,16 +167,18 @@ export default class AutomatedRunPlayer implements Player {
         playerId: this._id,
         activeData: {
           messages,
+          bobjects,
+          totalBytesReceived: this._receivedBytes,
           currentTime,
           startTime: this._providerResult.start,
-          endTime: this._providerResult.end,
+          endTime: this._endTime,
           isPlaying: this._isPlaying,
           speed: this._speed,
           messageOrder: "receiveTime",
           lastSeekTime: 0,
-          topics: this._providerResult.topics,
-          datatypes: this._providerResult.datatypes,
-          messageDefinitionsByTopic: this._providerResult.messageDefinitionsByTopic,
+          topics: this._providerTopics,
+          datatypes: initializationResult.messageDefinitions.datatypes,
+          parsedMessageDefinitionsByTopic: initializationResult.messageDefinitions.parsedMessageDefinitionsByTopic,
           playerWarnings: NO_WARNINGS,
         },
       });
@@ -167,7 +190,9 @@ export default class AutomatedRunPlayer implements Player {
   }
 
   setSubscriptions(subscriptions: SubscribePayload[]): void {
-    this._topics = new Set(subscriptions.map(({ topic }) => topic));
+    const [bobjectSubscriptions, parsedSubscriptions] = partition(subscriptions, ({ format }) => format === "bobjects");
+    this._bobjectTopics = new Set(bobjectSubscriptions.map(({ topic }) => topic));
+    this._parsedTopics = new Set(parsedSubscriptions.map(({ topic }) => topic));
 
     // Wait with running until we've subscribed to a bunch of topics.
     clearTimeout(this._initializeTimeout);
@@ -179,7 +204,6 @@ export default class AutomatedRunPlayer implements Player {
       return; // Prevent double loads.
     }
     this._initialized = true;
-    logger.info(`AutomatedRunPlayer._initialize()`);
 
     this._providerResult = await this._provider.initialize({
       progressCallback: (progress: Progress) => {
@@ -196,22 +220,39 @@ export default class AutomatedRunPlayer implements Player {
               "error"
             );
             break;
-          case "performance":
+          case "average_throughput":
             // Don't need analytics for data provider callbacks in video generation.
+            break;
+          case "initializationPerformance":
+            break;
+          case "received_bytes":
+            this._receivedBytes += metadata.bytes;
+            break;
+          case "data_provider_stall":
             break;
           default:
             (metadata.type: empty);
         }
       },
+      notifyPlayerManager: async () => {},
     });
+    this._providerTopics = this._providerResult.topics.map((t) => ({ ...t, preloadable: true }));
+
+    this._startTime = clampTime(
+      subtractTimes(this._client.rangeStartTime || this._providerResult.start, fromMillis(BUFFER_DURATION_SECS * 1000)),
+      this._providerResult.start,
+      this._providerResult.end
+    );
+    this._endTime = this._getEnd();
 
     await this._start();
   }
 
   async _start() {
     // Call _getMessages to start data loading and rendering for the first frame.
-    const messages = await this._getMessages(this._providerResult.start, this._providerResult.start);
-    await this._emitState(messages, this._providerResult.start);
+    const backfillStart = subtractTimes(this._startTime, { sec: 0, nsec: SEEK_BACK_NANOSECONDS });
+    const { parsedMessages, bobjects } = await this._getMessages(backfillStart, this._startTime);
+    await this._emitState(parsedMessages, bobjects, backfillStart);
     if (!this._startCalled) {
       this._client.markPreloadStart();
     }
@@ -220,10 +261,30 @@ export default class AutomatedRunPlayer implements Player {
     this._maybeStartPlayback();
   }
 
+  _getMessageOrderOffsetTime() {
+    // Play "past the end" when in header-stamp mode so the OrderedStampPlayer goes up to the end.
+    return this._globalMessageOrder === "receiveTime" ? fromSec(0) : fromSec(BUFFER_DURATION_SECS);
+  }
+
+  _getEnd(): Time {
+    const requestedDurationAsTime = this._client.durationMs
+      ? fromMillis(this._client.durationMs)
+      : { sec: Infinity, nsec: 0 };
+    const endTimeFromDuration = TimeUtil.add(this._startTime, requestedDurationAsTime);
+
+    const endTime = clampTime(
+      endTimeFromDuration,
+      this._providerResult.start,
+      this._client.rangeEndTime || this._providerResult.end
+    );
+
+    return TimeUtil.add(endTime, this._getMessageOrderOffsetTime());
+  }
+
   async _onUpdateProgress() {
     if (this._client.shouldLoadDataBeforePlaying && this._providerResult != null) {
       // Update the view and do preloading calculations. Not necessary if we're already playing.
-      this._emitState([], this._providerResult.start);
+      this._emitState([], [], this._startTime);
     }
     this._maybeStartPlayback();
   }
@@ -256,39 +317,70 @@ export default class AutomatedRunPlayer implements Player {
     }
     this._isPlaying = true;
     this._client.markPreloadEnd();
-    logger.info("AutomatedRunPlayer._run()");
-    await this._emitState([], this._providerResult.start);
+    console.log("AutomatedRunPlayer._run()");
+    await this._emitState([], [], this._startTime);
 
-    let currentTime = this._providerResult.start;
-    this._client.start({
-      bagLengthMs: toMillis(subtractTimes(this._providerResult.end, this._providerResult.start)),
-    });
+    const videoDurationMs = toMillis(subtractTimes(this._endTime, this._startTime));
+    this._client.start({ bagLengthMs: videoDurationMs });
 
+    const startEpoch = Date.now();
     const nsBagTimePerFrame = Math.round(this._msPerFrame * this._speed * 1000000);
 
-    let frameCount = 0;
-    while (TimeUtil.isLessThan(currentTime, this._providerResult.end)) {
-      if (this._waitToReportErrorPromise) {
-        await this._waitToReportErrorPromise;
-      }
-      const end = TimeUtil.add(currentTime, { sec: 0, nsec: nsBagTimePerFrame });
+    // We split up the frames between the workers,
+    // so we need to advance time based on the number of workers
+    const workerIndex = this._client.workerIndex ?? 0;
+    const workerCount = this._client.workerTotal ?? 1;
+    const nsFrameTimePerWorker = nsBagTimePerFrame * workerCount;
+    let currentTime = TimeUtil.add(this._startTime, {
+      sec: 0,
+      nsec: nsBagTimePerFrame * workerIndex,
+    });
+    const startBufferTime = TimeUtil.add(
+      this._client.rangeStartTime || this._startTime,
+      this._getMessageOrderOffsetTime()
+    );
+
+    // Main video recording loop
+    while (TimeUtil.isLessThan(currentTime, this._endTime)) {
       this._client.markTotalFrameStart();
-      const messages = await this._getMessages(currentTime, end);
 
+      const internalBackfillDuration = { sec: 0, nsec: SEEK_BACK_NANOSECONDS };
+      const backfillStart = clampTime(
+        subtractTimes(currentTime, internalBackfillDuration),
+        this._startTime,
+        this._endTime
+      );
+      const { parsedMessages, bobjects } = await this._getMessages(backfillStart, currentTime);
       this._client.markFrameRenderStart();
+
       // Wait for the frame render to finish.
-      await this._emitState(messages, end);
+      await this._emitState(parsedMessages, bobjects, currentTime);
+
       this._client.markTotalFrameEnd();
-      this._client.markFrameRenderEnd();
+      const frameRenderDurationMs = this._client.markFrameRenderEnd();
 
-      await this._client.onFrameFinished(frameCount);
+      const bagTimeSinceStartMs = toMillis(subtractTimes(currentTime, this._startTime));
 
-      currentTime = TimeUtil.add(end, { sec: 0, nsec: 1 });
-      frameCount++;
+      // Capture the frame once we are passed the preload time
+      if (!TimeUtil.isLessThan(currentTime, startBufferTime)) {
+        const percentComplete = bagTimeSinceStartMs / videoDurationMs;
+        await this._client.onFrameFinished({ percentComplete, frameRenderDurationMs });
+      }
+      // Advance time and loop
+      currentTime = clampTime(
+        TimeUtil.add(currentTime, { sec: 0, nsec: nsFrameTimePerWorker }),
+        this._providerResult.start,
+        this._endTime
+      );
     }
 
-    await this._client.finish();
-    logger.info("AutomatedRunPlayer._run() finished");
+    await this._client.finish({
+      startTimeMs: toMillis(this._startTime),
+      endTimeMs: toMillis(this._endTime),
+      msPerFrame: this._msPerFrame,
+    });
+    const totalDuration = (Date.now() - startEpoch) / 1000;
+    console.log(`AutomatedRunPlayer finished in ${formatSeconds(totalDuration)}`);
   }
 
   /* Public API shared functions */
@@ -301,16 +393,16 @@ export default class AutomatedRunPlayer implements Player {
     throw new Error(`Unsupported in AutomatedRunPlayer`);
   }
 
-  async close() {
-    throw new Error(`Unsupported in AutomatedRunPlayer`);
+  close() {
+    console.warn(`close: Unsupported in AutomatedRunPlayer`);
   }
 
   startPlayback() {
-    throw new Error(`Unsupported in AutomatedRunPlayer`);
+    console.warn(`startPlayback: Unsupported in AutomatedRunPlayer`);
   }
 
   pausePlayback() {
-    throw new Error(`Unsupported in AutomatedRunPlayer`);
+    console.warn(`pausePlayback: Unsupported in AutomatedRunPlayer`);
   }
 
   setPlaybackSpeed(_speed: number, _backfillDuration: ?Time) {
@@ -318,8 +410,14 @@ export default class AutomatedRunPlayer implements Player {
   }
 
   seekPlayback(_time: Time) {
-    throw new Error(`Unsupported in AutomatedRunPlayer`);
+    console.warn(`seekPlayback: Unsupported in AutomatedRunPlayer`);
   }
 
   requestBackfill() {}
+  setGlobalVariables() {
+    console.warn(`setGlobalVariables: Unsupported in AutomatedRunPlayer`);
+  }
+  setMessageOrder(messageOrder: TimestampMethod) {
+    this._globalMessageOrder = messageOrder;
+  }
 }

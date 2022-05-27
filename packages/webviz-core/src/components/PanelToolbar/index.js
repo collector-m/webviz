@@ -9,15 +9,15 @@
 import ArrowSplitHorizontalIcon from "@mdi/svg/svg/arrow-split-horizontal.svg";
 import ArrowSplitVerticalIcon from "@mdi/svg/svg/arrow-split-vertical.svg";
 import CheckboxMultipleBlankOutlineIcon from "@mdi/svg/svg/checkbox-multiple-blank-outline.svg";
+import CodeJsonIcon from "@mdi/svg/svg/code-json.svg";
+import CogIcon from "@mdi/svg/svg/cog.svg";
 import DragIcon from "@mdi/svg/svg/drag.svg";
 import FullscreenIcon from "@mdi/svg/svg/fullscreen.svg";
-import JsonIcon from "@mdi/svg/svg/json.svg";
-import SettingsIcon from "@mdi/svg/svg/settings.svg";
+import ImageIcon from "@mdi/svg/svg/image-frame.svg";
 import TrashCanOutlineIcon from "@mdi/svg/svg/trash-can-outline.svg";
 import cx from "classnames";
 import * as React from "react"; // eslint-disable-line import/no-duplicates
 import { useContext, useState, useCallback, useMemo } from "react"; // eslint-disable-line import/no-duplicates
-import Dimensions from "react-container-dimensions";
 import { MosaicContext, MosaicWindowContext } from "react-mosaic-component";
 // $FlowFixMe - typedefs do not recognize the ReactReduxContext import
 import { useDispatch, useSelector, ReactReduxContext } from "react-redux";
@@ -28,16 +28,20 @@ import styles from "./index.module.scss";
 import MosaicDragHandle from "./MosaicDragHandle";
 import { savePanelConfigs, changePanelLayout, closePanel, splitPanel, swapPanel } from "webviz-core/src/actions/panels";
 import ChildToggle from "webviz-core/src/components/ChildToggle";
+import Dimensions from "webviz-core/src/components/Dimensions";
 import Dropdown from "webviz-core/src/components/Dropdown";
 import Icon from "webviz-core/src/components/Icon";
 import { Item, SubMenu } from "webviz-core/src/components/Menu";
 import PanelContext from "webviz-core/src/components/PanelContext";
 import { getPanelTypeFromMosaic } from "webviz-core/src/components/PanelToolbar/utils";
 import renderToBody from "webviz-core/src/components/renderToBody";
+import { ScreenshotsContext } from "webviz-core/src/components/Screenshots/ScreenshotsContext";
 import ShareJsonModal from "webviz-core/src/components/ShareJsonModal";
 import PanelList, { type PanelSelection } from "webviz-core/src/panels/PanelList";
 import frameless from "webviz-core/src/util/frameless";
 import { TAB_PANEL_TYPE } from "webviz-core/src/util/globalConstants";
+import { getPanelTypeFromId } from "webviz-core/src/util/layout";
+import { logEventAction, getEventInfos, getEventTags } from "webviz-core/src/util/logEvent";
 
 type Props = {|
   children?: React.Node,
@@ -48,14 +52,16 @@ type Props = {|
   additionalIcons?: React.Node,
   hideToolbars?: boolean,
   showHiddenControlsOnHover?: boolean,
+  isUnknownPanel?: boolean,
 |};
 
 // separated into a sub-component so it can always skip re-rendering
 // it never changes after it initially mounts
-function StandardMenuItems({ tabId }: { tabId?: string }) {
+function StandardMenuItems({ tabId, isUnknownPanel }: { tabId?: string, isUnknownPanel: boolean }) {
+  const panelContext = useContext(PanelContext);
   const { mosaicActions } = useContext(MosaicContext);
   const { mosaicWindowActions } = useContext(MosaicWindowContext);
-  const savedProps = useSelector(({ panels }) => panels.savedProps);
+  const savedProps = useSelector((state) => state.persistedState.panels.savedProps);
   const dispatch = useDispatch();
   const actions = useMemo(
     () => bindActionCreators({ savePanelConfigs, changePanelLayout, closePanel, splitPanel, swapPanel }, dispatch),
@@ -67,38 +73,31 @@ function StandardMenuItems({ tabId }: { tabId?: string }) {
     mosaicWindowActions,
   ]);
 
-  const close = useCallback(
-    () => {
-      window.ga("send", "event", "Panel", "Close", getPanelType());
-      actions.closePanel({ tabId, root: mosaicActions.getRoot(), path: mosaicWindowActions.getPath() });
-    },
-    [actions, getPanelType, mosaicActions, mosaicWindowActions, tabId]
-  );
+  const close = useCallback(() => {
+    logEventAction(getEventInfos().PANEL_REMOVE, { [getEventTags().PANEL_TYPE]: getPanelType() });
+    actions.closePanel({ tabId, root: mosaicActions.getRoot(), path: mosaicWindowActions.getPath() });
+  }, [actions, getPanelType, mosaicActions, mosaicWindowActions, tabId]);
 
-  const split = useCallback(
-    (store, id: ?string, direction: "row" | "column") => {
-      const type = getPanelType();
-      if (!id || !type) {
-        throw new Error("Trying to split unknown panel!");
-      }
-      window.ga("send", "event", "Panel", "Split", type);
+  const split = useCallback((store, id: ?string, direction: "row" | "column") => {
+    const type = getPanelType();
+    if (!id || !type) {
+      throw new Error("Trying to split unknown panel!");
+    }
+    logEventAction(getEventInfos().PANEL_SPLIT, { [getEventTags().PANEL_TYPE]: getPanelType() });
 
-      const config = savedProps[id];
-      actions.splitPanel({
-        id,
-        tabId,
-        direction,
-        root: mosaicActions.getRoot(),
-        path: mosaicWindowActions.getPath(),
-        config,
-      });
-    },
-    [actions, getPanelType, mosaicActions, mosaicWindowActions, savedProps, tabId]
-  );
+    const config = savedProps[id];
+    actions.splitPanel({
+      id,
+      tabId,
+      direction,
+      root: mosaicActions.getRoot(),
+      path: mosaicWindowActions.getPath(),
+      config,
+    });
+  }, [actions, getPanelType, mosaicActions, mosaicWindowActions, savedProps, tabId]);
 
   const swap = useCallback(
     (id: ?string) => ({ type, config, relatedConfigs }: PanelSelection) => {
-      window.ga("send", "event", "Panel", "Swap", type);
       actions.swapPanel({
         tabId,
         originalId: id,
@@ -108,27 +107,50 @@ function StandardMenuItems({ tabId }: { tabId?: string }) {
         config,
         relatedConfigs,
       });
+      logEventAction(getEventInfos().PANEL_SWAP, {
+        [getEventTags().PANEL_TYPE]: type,
+        ...(id ? { previous_panel_type: getPanelTypeFromId(id) } : {}),
+      });
     },
     [actions, mosaicActions, mosaicWindowActions, tabId]
   );
 
-  const onImportClick = useCallback(
-    (store, id) => {
-      if (!id) {
-        return;
-      }
-      const panelConfigById = store.getState().panels.savedProps;
-      const modal = renderToBody(
-        <ShareJsonModal
-          onRequestClose={() => modal.remove()}
-          value={panelConfigById[id] || {}}
-          onChange={(config) => actions.savePanelConfigs({ configs: [{ id, config, override: true }] })}
-          noun="panel configuration"
-        />
-      );
-    },
-    [actions]
-  );
+  const onImportClick = useCallback((store, id) => {
+    if (!id) {
+      return;
+    }
+    const panelConfigById = store.getState().persistedState.panels.savedProps;
+    const modal = renderToBody(
+      <ShareJsonModal
+        onRequestClose={() => modal.remove()}
+        value={panelConfigById[id] || {}}
+        onChange={(config) => actions.savePanelConfigs({ configs: [{ id, config, override: true }] })}
+        noun="panel configuration"
+      />
+    );
+  }, [actions]);
+
+  const { downloadScreenshot, copyScreenshotToClipboard } = useContext(ScreenshotsContext);
+
+  const getScreenshotElement = useCallback(() => {
+    const panelId = panelContext?.id;
+    const element = panelId && document.querySelector(`[data-panel-id="${panelId}"]`);
+    return { panelId, element };
+  }, [panelContext]);
+
+  const takePanelScreenshot = useCallback(() => {
+    const { panelId, element } = getScreenshotElement();
+    if (panelId && element) {
+      downloadScreenshot(element, `${panelId}.jpg`);
+    }
+  }, [downloadScreenshot, getScreenshotElement]);
+
+  const copyPanelImageToClipboard = useCallback(() => {
+    const { element } = getScreenshotElement();
+    if (element) {
+      copyScreenshotToClipboard(element);
+    }
+  }, [copyScreenshotToClipboard, getScreenshotElement]);
 
   const type = getPanelType();
   if (!type) {
@@ -138,15 +160,15 @@ function StandardMenuItems({ tabId }: { tabId?: string }) {
   return (
     <ReactReduxContext.Consumer>
       {({ store }) => (
-        <PanelContext.Consumer>
-          {(panelContext) => (
+        <>
+          <SubMenu text="Change panel" icon={<CheckboxMultipleBlankOutlineIcon />} dataTest="panel-settings-change">
+            <PanelList selectedPanelTitle={panelContext?.title} onPanelSelect={swap(panelContext?.id)} />
+          </SubMenu>
+          {!isUnknownPanel && (
             <>
-              <SubMenu text="Change panel" icon={<CheckboxMultipleBlankOutlineIcon />} dataTest="panel-settings-change">
-                <PanelList selectedPanelTitle={panelContext?.title} onPanelSelect={swap(panelContext?.id)} />
-              </SubMenu>
               <Item
                 icon={<FullscreenIcon />}
-                onClick={panelContext?.enterFullscreen}
+                onClick={panelContext?.enterFullScreen}
                 dataTest="panel-settings-fullscreen"
                 tooltip="(shortcut: ` or ~)">
                 Fullscreen
@@ -165,23 +187,29 @@ function StandardMenuItems({ tabId }: { tabId?: string }) {
                 tooltip="(shortcut: ` or ~)">
                 Split vertical
               </Item>
-              <Item
-                icon={<TrashCanOutlineIcon />}
-                onClick={close}
-                dataTest="panel-settings-remove"
-                tooltip="(shortcut: ` or ~)">
-                Remove panel
-              </Item>
-              <Item
-                icon={<JsonIcon />}
-                onClick={() => onImportClick(store, panelContext?.id)}
-                disabled={type === TAB_PANEL_TYPE}
-                dataTest="panel-settings-config">
-                Import/export panel settings
-              </Item>
             </>
           )}
-        </PanelContext.Consumer>
+          <Item
+            icon={<TrashCanOutlineIcon />}
+            onClick={close}
+            dataTest="panel-settings-remove"
+            tooltip="(shortcut: ` or ~)">
+            Remove panel
+          </Item>
+          {!isUnknownPanel && (
+            <Item
+              icon={<CodeJsonIcon />}
+              onClick={() => onImportClick(store, panelContext?.id)}
+              disabled={type === TAB_PANEL_TYPE}
+              dataTest="panel-settings-config">
+              Import/export panel settings
+            </Item>
+          )}
+          <SubMenu text="Capture as image" icon={<ImageIcon />} dataTest="panel-settings-screenshot">
+            <Item onClick={takePanelScreenshot}>Download as jpeg</Item>
+            <Item onClick={copyPanelImageToClipboard}>Copy to clipboard</Item>
+          </SubMenu>
+        </>
       )}
     </ReactReduxContext.Consumer>
   );
@@ -192,6 +220,7 @@ type PanelToolbarControlsProps = {|
   isRendered: boolean,
   onDragStart: () => void,
   onDragEnd: () => void,
+  isUnknownPanel: boolean,
 |};
 
 // Keep controls, which don't change often, in a pure component in order to avoid re-rendering the
@@ -199,7 +228,7 @@ type PanelToolbarControlsProps = {|
 const PanelToolbarControls = React.memo(function PanelToolbarControls(props: PanelToolbarControlsProps) {
   const panelData = useContext(PanelContext);
   const { floating, helpContent, menuContent, showPanelName, additionalIcons, showHiddenControlsOnHover } = props;
-  const { isRendered, onDragStart, onDragEnd } = props;
+  const { isRendered, onDragStart, onDragEnd, isUnknownPanel } = props;
 
   return (
     <div
@@ -212,21 +241,23 @@ const PanelToolbarControls = React.memo(function PanelToolbarControls(props: Pan
         flatEdges={!floating}
         toggleComponent={
           <Icon fade tooltip="Panel settings" dataTest="panel-settings">
-            <SettingsIcon className={styles.icon} />
+            <CogIcon className={styles.icon} />
           </Icon>
         }>
-        <StandardMenuItems tabId={panelData?.tabId} />
+        <StandardMenuItems tabId={panelData?.tabId} isUnknownPanel={isUnknownPanel} />
         {menuContent && <hr />}
         {menuContent}
       </Dropdown>
-      <MosaicDragHandle onDragStart={onDragStart} onDragEnd={onDragEnd} tabId={panelData?.tabId}>
-        {/* Can only nest native nodes into <MosaicDragHandle>, so wrapping in a <span> */}
-        <span>
-          <Icon fade tooltip="Move panel (shortcut: ` or ~)">
-            <DragIcon className={styles.dragIcon} />
-          </Icon>
-        </span>
-      </MosaicDragHandle>
+      {!isUnknownPanel && (
+        <MosaicDragHandle onDragStart={onDragStart} onDragEnd={onDragEnd} tabId={panelData?.tabId}>
+          {/* Can only nest native nodes into <MosaicDragHandle>, so wrapping in a <span> */}
+          <span>
+            <Icon fade tooltip="Move panel (shortcut: ` or ~)">
+              <DragIcon className={styles.dragIcon} />
+            </Icon>
+          </span>
+        </MosaicDragHandle>
+      )}
     </div>
   );
 });
@@ -243,6 +274,7 @@ export default React.memo<Props>(function PanelToolbar(props: Props) {
     additionalIcons,
     hideToolbars,
     showHiddenControlsOnHover,
+    isUnknownPanel,
   } = props;
   const { isHovered } = useContext(PanelContext) || {};
   const [isDragging, setIsDragging] = useState(false);
@@ -258,7 +290,7 @@ export default React.memo<Props>(function PanelToolbar(props: Props) {
       {({ width }) => (
         <ChildToggle.ContainsOpen>
           {(containsOpen) => {
-            const isRendered = isHovered || containsOpen || isDragging;
+            const isRendered = isHovered || containsOpen || isDragging || !!isUnknownPanel;
             return (
               <div
                 className={cx(styles.panelToolbarContainer, {
@@ -279,6 +311,7 @@ export default React.memo<Props>(function PanelToolbar(props: Props) {
                     additionalIcons={additionalIcons}
                     onDragStart={onDragStart}
                     onDragEnd={onDragEnd}
+                    isUnknownPanel={!!isUnknownPanel}
                   />
                 )}
               </div>

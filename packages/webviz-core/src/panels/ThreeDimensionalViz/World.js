@@ -6,44 +6,38 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import React, { useMemo, useState, useEffect, type Node } from "react";
+import React, { type Node, forwardRef } from "react";
 import {
-  Worldview,
-  Arrows,
-  Cubes,
-  Cylinders,
-  GLText,
-  Lines,
-  Points,
-  Spheres,
-  Triangles,
-  FilledPolygons,
+  OffscreenWorldview,
   type CameraState,
   type MouseHandler,
-  createInstancedGetChildrenForHitmap,
+  DEFAULT_CAMERA_STATE,
+  WorldviewReactContext,
 } from "regl-worldview";
 
-import glTextAtlasLoader, { type TextAtlas } from "./utils/glTextAtlasLoader";
-import { groupLinesIntoInstancedLineLists } from "./utils/groupingUtils";
-import { useExperimentalFeature } from "webviz-core/src/components/ExperimentalFeatures";
-import { getGlobalHooks } from "webviz-core/src/loadWebviz";
+import OverlayProjector from "webviz-core/src/panels/ThreeDimensionalViz/commands/OverlayProjector";
+import { LAYER_INDEX_DEFAULT_BASE } from "webviz-core/src/panels/ThreeDimensionalViz/constants";
+import Crosshair from "webviz-core/src/panels/ThreeDimensionalViz/Crosshair";
+import MeasureMarker, { type MeasurePoints } from "webviz-core/src/panels/ThreeDimensionalViz/MeasureMarker";
+import type { ThreeDimensionalVizHooks } from "webviz-core/src/panels/ThreeDimensionalViz/SceneBuilder/types";
+import { withDiffMode } from "webviz-core/src/panels/ThreeDimensionalViz/utils/diffModeUtils";
 import {
-  OccupancyGrids,
-  LaserScans,
-  PointClouds,
-  PoseMarkers,
-  LinedConvexHulls,
-} from "webviz-core/src/panels/ThreeDimensionalViz/commands";
-import { type WorldSearchTextProps, useGLText } from "webviz-core/src/panels/ThreeDimensionalViz/SearchText";
+  TextHighlighter,
+  type WorldSearchTextProps,
+} from "webviz-core/src/panels/ThreeDimensionalViz/utils/searchTextUtils";
+import withHighlights from "webviz-core/src/panels/ThreeDimensionalViz/withWorldMarkerHighlights.js";
+import WorldMarkers, { type InteractiveMarkersByType } from "webviz-core/src/panels/ThreeDimensionalViz/WorldMarkers";
 import inScreenshotTests from "webviz-core/src/stories/inScreenshotTests";
-import type { TextMarker } from "webviz-core/src/types/Messages";
 import type { MarkerCollector, MarkerProvider } from "webviz-core/src/types/Scene";
+import { useChangeDetector, useGetCurrentValue } from "webviz-core/src/util/hooks";
 
 type Props = {|
   autoTextBackgroundColor: boolean,
   cameraState: CameraState,
   children?: Node,
+  hooks: ThreeDimensionalVizHooks,
   isPlaying: boolean,
+  isDemoMode: boolean,
   markerProviders: MarkerProvider[],
   onCameraStateChange: (CameraState) => void,
   onClick: MouseHandler,
@@ -51,20 +45,48 @@ type Props = {|
   onMouseDown?: MouseHandler,
   onMouseMove?: MouseHandler,
   onMouseUp?: MouseHandler,
+  diffModeEnabled: boolean,
+  canvas: HTMLCanvasElement,
+  setOverlayIcons: (any) => void,
+  showCrosshair: ?boolean,
+  measurePoints: MeasurePoints,
+  resolveRenderSignal: () => void,
+  sphericalRangeScale: number,
   ...WorldSearchTextProps,
 |};
 
-function getMarkers(markerProviders: MarkerProvider[]) {
-  const markers = {};
+function getMarkers(markerProviders: MarkerProvider[], hooks: ThreeDimensionalVizHooks): InteractiveMarkersByType {
+  const markers: InteractiveMarkersByType = {
+    arrow: [],
+    cube: [],
+    cubeList: [],
+    cylinder: [],
+    filledPolygon: [],
+    glText: [],
+    grid: [],
+    instancedLineList: [],
+    laserScan: [],
+    linedConvexHull: [],
+    lineList: [],
+    lineStrip: [],
+    overlayIcon: [],
+    radarPointCluster: [],
+    pointcloud: [],
+    points: [],
+    poseMarker: [],
+    sphere: [],
+    sphereList: [],
+    text: [],
+    triangleList: [],
+  };
+
   const collector = {};
-  getGlobalHooks()
-    .perPanelHooks()
-    .ThreeDimensionalViz.allSupportedMarkers.forEach((field) => {
-      if (!markers[field]) {
-        markers[field] = [];
-      }
-      collector[field] = (o) => markers[field].push(o);
-    });
+  hooks.allSupportedMarkers.forEach((field) => {
+    if (!markers[field]) {
+      markers[field] = [];
+    }
+    collector[field] = (o) => markers[field].push(o);
+  });
 
   markerProviders.forEach((provider) => {
     if (provider) {
@@ -75,99 +97,84 @@ function getMarkers(markerProviders: MarkerProvider[]) {
   return markers;
 }
 
-// Generate an alphabet for text makers with the most
-// used ASCII characters to prevent recreating the texture
-// atlas too many times for dynamic texts.
-const ALPHABET = (() => {
-  const start = 32; // SPACE
-  const end = 125; // "}"
-  return new Array(end - start + 1).fill().map((_, i) => String.fromCodePoint(start + i));
-})();
+// When rendering in a worker, we wait until worldview paints before calling resumeFrame.
+function RenderSignalResolver({ resolveRenderSignal }: { resolveRenderSignal: () => void }) {
+  const getResolveRenderSignal = useGetCurrentValue(resolveRenderSignal);
+  const resolveLatestSignal = React.useCallback(() => {
+    getResolveRenderSignal()();
+  }, [getResolveRenderSignal]);
 
-const glTextAtlasPromise = glTextAtlasLoader();
+  const worldviewContext = React.useContext(WorldviewReactContext);
+  if (useChangeDetector([resolveRenderSignal], true) && worldviewContext) {
+    // If the 3D panel is completely empty, we don't want to block playback if worldview doesn't
+    // paint. Force a worldview paint to occur for every frame, even if it wouldn't normally
+    // schedule one.
+    worldviewContext.onDirty();
+  }
 
-type GLTextAtlasStatus = {
-  status: "LOADING" | "LOADED",
-  glTextAtlas: ?TextAtlas,
-};
+  React.useEffect(() => {
+    if (worldviewContext) {
+      worldviewContext.registerPaintCallback(resolveLatestSignal);
+      return () => {
+        worldviewContext.unregisterPaintCallback(resolveLatestSignal);
+      };
+    }
+  }, [resolveLatestSignal, worldviewContext]);
+  return null;
+}
 
-export default function World({
-  onClick,
-  autoTextBackgroundColor,
-  children,
-  onCameraStateChange,
-  cameraState,
-  isPlaying,
-  markerProviders,
-  onDoubleClick,
-  onMouseDown,
-  onMouseMove,
-  onMouseUp,
-  setSearchTextMatches,
-  searchText,
-  searchTextOpen,
-  selectedMatchIndex,
-  searchTextMatches,
-}: Props) {
-  const getChildrenForHitmap = useMemo(() => createInstancedGetChildrenForHitmap(2), []);
-  const {
-    arrow,
-    cube,
-    cubeList,
-    cylinder,
-    filledPolygon,
-    grid,
-    instancedLineList,
-    laserScan,
-    linedConvexHull,
-    lineList,
-    lineStrip,
-    pointcloud,
-    points,
-    poseMarker,
-    sphere,
-    sphereList,
-    text,
-    triangleList,
-    ...rest
-  } = getMarkers(markerProviders);
-  const additionalMarkers = getGlobalHooks()
-    .perPanelHooks()
-    .ThreeDimensionalViz.renderAdditionalMarkers(rest);
+// Wrap the WorldMarkers in HoC(s)
+const WrappedWorldMarkers = withHighlights(withDiffMode(WorldMarkers));
 
-  const textMarkers = useGLText({
-    text: (text: TextMarker[]),
+function World(
+  {
+    onClick,
+    autoTextBackgroundColor,
+    children,
+    onCameraStateChange,
+    diffModeEnabled,
+    cameraState,
+    hooks,
+    isPlaying,
+    isDemoMode,
+    markerProviders,
+    onDoubleClick,
+    onMouseDown,
+    onMouseMove,
+    onMouseUp,
     setSearchTextMatches,
     searchText,
     searchTextOpen,
     selectedMatchIndex,
     searchTextMatches,
-  });
+    canvas,
+    setOverlayIcons,
+    showCrosshair,
+    measurePoints,
+    resolveRenderSignal,
+    sphericalRangeScale,
+  }: Props,
+  ref: OffscreenWorldview
+) {
+  const markersByType = getMarkers(markerProviders, hooks);
+  const { text = [], overlayIcon } = markersByType;
+  const textHighlighter = React.useMemo(() => new TextHighlighter(setSearchTextMatches), [setSearchTextMatches]);
+  const processedMarkersByType = {
+    ...markersByType,
+    text: [],
+    glText: textHighlighter.highlightText({
+      text,
+      searchText,
+      searchTextOpen,
+      selectedMatchIndex,
+      searchTextMatches,
+    }),
+  };
 
-  // GLTextAtlas download is shared among all instances of World, but we should only load the GLText command once we
-  // have the pregenerated atlas available.
-  const [glTextAtlasInfo, setGlTextAtlasInfo] = useState<GLTextAtlasStatus>({
-    status: "LOADING",
-    glTextAtlas: undefined,
-  });
-  useEffect(() => {
-    glTextAtlasPromise.then((atlas) => {
-      setGlTextAtlasInfo({ status: "LOADED", glTextAtlas: atlas });
-    });
-  }, []);
-
-  // If 'groupLines' is enabled, we group all line strips and line lists
-  // into as few markers as possible. Otherwise, just render them as is.
-  const groupLines = useExperimentalFeature("groupLines");
-  let groupedLines = [];
-  let nonGroupedLines = [...lineList, ...lineStrip];
-  if (groupLines) {
-    groupedLines = groupLinesIntoInstancedLineLists(nonGroupedLines);
-    nonGroupedLines = [];
-  }
+  const cameraDistance = cameraState.distance || DEFAULT_CAMERA_STATE.distance;
 
   return (
-    <Worldview
+    <OffscreenWorldview
       cameraState={cameraState}
       enableStackedObjectEvents={!isPlaying}
       hideDebug={inScreenshotTests()}
@@ -180,33 +187,33 @@ export default function World({
       onDoubleClick={onDoubleClick}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}>
+      onMouseUp={onMouseUp}
+      resolutionScale={isDemoMode ? 2 : 1}
+      ref={ref}
+      contextAttributes={{ preserveDrawingBuffer: true }}
+      canvas={canvas}
+      width={canvas.width}
+      height={canvas.height}
+      top={0}
+      left={0}>
       {children}
-      <OccupancyGrids layerIndex={-1}>{grid}</OccupancyGrids>
-      {additionalMarkers}
-      <Lines>{nonGroupedLines}</Lines>
-      <Arrows>{arrow}</Arrows>
-      <Points>{points}</Points>
-      <PointClouds>{pointcloud}</PointClouds>
-      <Triangles>{triangleList}</Triangles>
-      <Spheres>{[...sphere, ...sphereList]}</Spheres>
-      <Cylinders>{cylinder}</Cylinders>
-      <Cubes>{[...cube, ...cubeList]}</Cubes>
-      <PoseMarkers>{poseMarker}</PoseMarkers>
-      <LaserScans>{laserScan}</LaserScans>
-      {glTextAtlasInfo.status === "LOADED" && (
-        <GLText
-          layerIndex={10}
-          alphabet={ALPHABET}
-          scaleInvariantFontSize={14}
-          autoBackgroundColor={autoTextBackgroundColor}
-          textAtlas={glTextAtlasInfo.glTextAtlas}>
-          {textMarkers}
-        </GLText>
-      )}
-      <FilledPolygons>{filledPolygon}</FilledPolygons>
-      <Lines getChildrenForHitmap={getChildrenForHitmap}>{[...instancedLineList, ...groupedLines]}</Lines>
-      <LinedConvexHulls>{linedConvexHull}</LinedConvexHulls>
-    </Worldview>
+      <RenderSignalResolver resolveRenderSignal={resolveRenderSignal} />
+      <WrappedWorldMarkers
+        {...{
+          autoTextBackgroundColor,
+          markersByType: processedMarkersByType,
+          layerIndex: LAYER_INDEX_DEFAULT_BASE,
+          clearCachedMarkers: false,
+          diffModeEnabled,
+          hooks,
+          sphericalRangeScale,
+        }}
+      />
+      <OverlayProjector setOverlayIcons={setOverlayIcons}>{overlayIcon}</OverlayProjector>
+      {!cameraState.perspective && showCrosshair && <Crosshair cameraState={cameraState} hooks={hooks} />}
+      <MeasureMarker measurePoints={measurePoints} cameraDistance={cameraDistance} />
+    </OffscreenWorldview>
   );
 }
+
+export default forwardRef<typeof OffscreenWorldview, _>(World);

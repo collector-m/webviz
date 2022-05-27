@@ -49,12 +49,12 @@ type Props = {|
   // set to true to display the content component
   isOpen: boolean,
   // fired when the trigger component is clicked
-  onToggle: () => void,
+  onToggle: (node?: HTMLElement) => void,
   // requires exactly 2 components: a toggle trigger & a content component
   children: [React$Element<any>, React$Element<any>],
   style?: { [string]: any },
   // alignment of the content component
-  position: "above" | "below" | "left" | "right",
+  position: "above" | "below" | "left" | "right" | "bottom-left",
   // don't use a portal, e.g. if you are nesting this already in a portal
   noPortal?: boolean,
   dataTest?: string,
@@ -80,14 +80,15 @@ export default class ChildToggle extends React.Component<Props> {
   }
 
   addDocListener() {
-    // add a document listener to hide the dropdown body if
-    // it is expanded and the document is clicked on
-    document.addEventListener("click", this.onDocumentClick, true);
+    // add a document listener to hide the dropdown body if it is expanded and
+    // the document is clicked on. Using 'mousedown' here instead of 'click'
+    // since we don't want click-and-drag interactions to close the toggle.
+    document.addEventListener("mousedown", this.onDocumentClick, true);
   }
 
   removeDocListener() {
     // cleanup the document listener
-    document.removeEventListener("click", this.onDocumentClick, true);
+    document.removeEventListener("mousedown", this.onDocumentClick, true);
   }
 
   componentDidUpdate(prevProps: Props) {
@@ -119,7 +120,10 @@ export default class ChildToggle extends React.Component<Props> {
     } else {
       // allow any nested child toggle click events to reach their dom node before removing
       // the expanded toggle portion from the dom
-      setImmediate(onToggle);
+      setImmediate(() => {
+        // Passing 'node' here is useful for nested portal issues.
+        onToggle(node);
+      });
     }
   };
 
@@ -149,8 +153,13 @@ export default class ChildToggle extends React.Component<Props> {
       styleObj.top = childRect.top;
       spacerSize = window.innerWidth - childRect.left - padding;
     } else if (position === "below") {
-      styleObj.top = childRect.top + childRect.height;
+      // Floating menu should have 4px overlap with the toggle element above it
+      styleObj.top = childRect.top + childRect.height - 4;
       spacerSize = childRect.left - padding;
+    } else if (position === "bottom-left") {
+      // Floating menu should have 4px overlap with the toggle element above it
+      styleObj.top = childRect.top + childRect.height - 4;
+      spacerSize = window.innerWidth - childRect.right - padding;
     } else if (position === "above") {
       delete styleObj.bottom;
       styleObj.height = childRect.top - padding;
@@ -169,7 +178,7 @@ export default class ChildToggle extends React.Component<Props> {
       <div ref={(el) => (this.floatingEl = el)}>
         <Flex
           row
-          reverse={position === "left"}
+          reverse={position === "left" || position === "bottom-left"}
           start={position !== "above"}
           end={position === "above"}
           className={styles.childContainer}

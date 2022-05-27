@@ -26,10 +26,12 @@ const baseNodeData: NodeData = {
   inputTopics: [],
   outputTopic: "",
   outputDatatype: "",
+  globalVariables: [],
   datatypes: {},
   sourceFile: undefined,
   typeChecker: undefined,
   rosLib: "",
+  enableSecondSource: false,
   projectCode: new Map<string, string>(),
 };
 

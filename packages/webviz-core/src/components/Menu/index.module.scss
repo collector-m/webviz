@@ -53,6 +53,10 @@
       opacity: 0.5;
     }
   }
+
+  &.hoverForScreenshot {
+    @extend %menu-item-hover;
+  }
 }
 
 .submenuIconLeft,
@@ -69,7 +73,7 @@
 }
 
 .icon {
-  margin-right: 8px;
+  margin-right: 12px;
   font-size: 14px;
   vertical-align: middle;
 }

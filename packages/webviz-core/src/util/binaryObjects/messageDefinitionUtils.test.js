@@ -6,31 +6,35 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { addTimeTypes, friendlyTypeName, typeSize } from "./messageDefinitionUtils";
-import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
+import { addTimeTypes, friendlyTypeName, PointerExpression, typeSize } from "./messageDefinitionUtils";
+import { definitions } from "./testUtils";
 
-export const definitions: RosDatatypes = {
-  "std_msgs/Header": {
-    fields: [{ type: "uint32", name: "seq" }, { type: "time", name: "stamp" }, { type: "string", name: "frame_id" }],
-  },
-  "fake_msgs/HasComplexAndArray": {
-    fields: [{ type: "std_msgs/Header", name: "header" }, { type: "string", isArray: true, name: "stringArray" }],
-  },
-  "fake_msgs/HasComplexArray": {
-    fields: [{ type: "fake_msgs/HasComplexAndArray", name: "complexArray", isArray: true }],
-  },
-  "fake_msgs/HasConstant": {
-    fields: [{ type: "uint8", name: "const", isConstant: true, value: 1 }],
-  },
-  "fake_msgs/HasByteArray": {
-    fields: [{ type: "uint8", name: "byte_array", isArray: true }],
-  },
-};
+describe("PointerExpression", () => {
+  it("prints a constructed expression nicely", () => {
+    expect(new PointerExpression("this.offset").toString()).toBe("this.offset");
+  });
+
+  it("adds correctly", () => {
+    expect(new PointerExpression("this.offset").add(10).toString()).toBe("(this.offset + 10)");
+    expect(
+      new PointerExpression("this.offset")
+        .add(10)
+        .add(-10)
+        .toString()
+    ).toBe("this.offset");
+  });
+});
 
 describe("friendlyTypeName", () => {
-  it("handles removes slashes from primitives and message types", () => {
+  it("removes slashes from primitives and message types", () => {
     expect(friendlyTypeName("time")).toBe("time");
     expect(friendlyTypeName("std_msgs/Header")).toBe("std_msgs_Header");
+  });
+
+  it("removes more than one slash when several are present", () => {
+    expect(friendlyTypeName("webviz_msgs/traffic_light_lane_state/directive_state")).toBe(
+      "webviz_msgs_traffic_light_lane_state_directive_state"
+    );
   });
 });
 

@@ -18,6 +18,7 @@ import ChildToggle from "webviz-core/src/components/ChildToggle";
 import Menu from "webviz-core/src/components/Menu";
 import PanelList, { type PanelSelection } from "webviz-core/src/panels/PanelList";
 import cssColors from "webviz-core/src/styles/colors.module.scss";
+import { logEventAction, getEventInfos, getEventTags } from "webviz-core/src/util/logEvent";
 import { colors } from "webviz-core/src/util/sharedStyleConstants";
 
 const SDropTarget = styled.div`
@@ -71,13 +72,10 @@ export const EmptyDropTarget = ({ mosaicId, tabId }: Props) => {
     }),
   });
 
-  const onPanelSelect = useCallback(
-    ({ type, config, relatedConfigs }: PanelSelection) => {
-      dispatch(addPanel({ tabId, type, layout: null, config, relatedConfigs }));
-      window.ga("send", "event", "Panel", "Select", type);
-    },
-    [dispatch, tabId]
-  );
+  const onPanelSelect = useCallback(({ type, config, relatedConfigs }: PanelSelection) => {
+    dispatch(addPanel({ tabId, type, layout: null, config, relatedConfigs }));
+    logEventAction(getEventInfos().PANEL_ADD, { [getEventTags().PANEL_TYPE]: type });
+  }, [dispatch, tabId]);
 
   return (
     <SDropTarget ref={drop} isOver={isOver} data-test="empty-drop-target">

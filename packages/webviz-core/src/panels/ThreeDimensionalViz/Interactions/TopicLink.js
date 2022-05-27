@@ -25,20 +25,16 @@ type Props = {
 
 export default function TopicLink({ topic }: Props) {
   const { openSiblingPanel } = usePanelContext();
-  const openRawMessages = React.useCallback(
-    () => {
-      if (!openSiblingPanel) {
-        return;
-      }
-      openSiblingPanel(
-        // $FlowFixMe: https://stackoverflow.com/questions/52508434/adding-static-variable-to-union-of-class-types
-        RawMessages.panelType,
-        // $FlowFixMe
-        (config: RawMessagesConfig) => ({ ...config, topicPath: topic }: RawMessagesConfig)
-      );
-    },
-    [openSiblingPanel, topic]
-  );
+  const openRawMessages = React.useCallback(() => {
+    if (!openSiblingPanel) {
+      return;
+    }
+    openSiblingPanel(
+      RawMessages.panelType,
+      // $FlowFixMe
+      (config: RawMessagesConfig) => ({ ...config, topicPath: topic }: RawMessagesConfig)
+    );
+  }, [openSiblingPanel, topic]);
 
   return (
     <Tooltip placement="top" contents={`View ${topic} in Raw Messages panel`}>

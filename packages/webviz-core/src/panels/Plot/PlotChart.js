@@ -7,28 +7,27 @@
 //  You may not use this file except in compliance with the License.
 
 import flatten from "lodash/flatten";
-import React, { memo } from "react";
-import Dimensions from "react-container-dimensions";
-import { createSelector } from "reselect";
+import React, { memo, useMemo } from "react";
 import { Time } from "rosbag";
 import uuid from "uuid";
 
 import type { PlotXAxisVal } from "./index";
 import styles from "./PlotChart.module.scss";
-import TimeBasedChart, {
-  type ChartDefaultView,
-  type TimeBasedChartTooltipData,
-  type TooltipItem,
-} from "webviz-core/src/components/TimeBasedChart";
+import Dimensions from "webviz-core/src/components/Dimensions";
+import { useExperimentalFeature } from "webviz-core/src/components/ExperimentalFeatures";
+import TimeBasedChart, { type ChartDefaultView } from "webviz-core/src/components/TimeBasedChart";
+import { type TimeBasedChartTooltipData, type TooltipItem } from "webviz-core/src/components/TimeBasedChart/utils";
 import filterMap from "webviz-core/src/filterMap";
-import derivative from "webviz-core/src/panels/Plot/derivative";
 import {
   type PlotPath,
   type BasePlotPath,
   isReferenceLinePlotPathType,
 } from "webviz-core/src/panels/Plot/internalTypes";
+import { derivative, applyToDataOrTooltips, mathFunctions } from "webviz-core/src/panels/Plot/transformPlotRange";
+import { deepParse, isBobject } from "webviz-core/src/util/binaryObjects";
+import { format } from "webviz-core/src/util/formatTime";
 import { lightColor, lineColors } from "webviz-core/src/util/plotColors";
-import { format, formatTimeRaw, isTime, subtractTimes, toSec } from "webviz-core/src/util/time";
+import { isTime, subtractTimes, toSec, formatTimeRaw } from "webviz-core/src/util/time";
 
 export type PlotChartPoint = {|
   x: number,
@@ -73,7 +72,9 @@ function getXForPoint(
       if (!xItem) {
         return NaN;
       }
-      const value = xItem.queriedData[innerIdx]?.value;
+      // It is possible that values are still bobjects at this point. Parse if needed.
+      const maybeBobject = xItem.queriedData[innerIdx]?.value;
+      const value = maybeBobject && isBobject(maybeBobject) ? deepParse(maybeBobject) : maybeBobject;
       return isTime(value) ? toSec((value: any)) : Number(value);
     }
   }
@@ -90,11 +91,12 @@ function getPointsAndTooltipsForMessagePathItem(
   xItem: ?TooltipItem,
   startTime: Time,
   timestampMethod,
+  path: string,
   xAxisVal: PlotXAxisVal,
   xAxisPath?: BasePlotPath,
   xAxisRanges: ?$ReadOnlyArray<$ReadOnlyArray<TooltipItem>>,
   datasetKey: string
-) {
+): { points: PlotChartPoint[], tooltips: TimeBasedChartTooltipData[], hasMismatchedData: boolean } {
   const points = [];
   const tooltips = [];
   const timestamp = timestampMethod === "headerStamp" ? yItem.headerStamp : yItem.receiveTime;
@@ -102,7 +104,9 @@ function getPointsAndTooltipsForMessagePathItem(
     return { points, tooltips, hasMismatchedData: false };
   }
   const elapsedTime = toSec(subtractTimes(timestamp, startTime));
-  for (const [innerIdx, { value, path: queriedPath, constantName }] of yItem.queriedData.entries()) {
+  for (const [innerIdx, { value: maybeBobject, path: queriedPath, constantName }] of yItem.queriedData.entries()) {
+    // It is possible that values are still bobjects at this point. Parse if needed.
+    const value = isBobject(maybeBobject) ? deepParse(maybeBobject) : maybeBobject;
     if (typeof value === "number" || typeof value === "boolean" || typeof value === "string") {
       const valueNum = Number(value);
       if (!isNaN(valueNum)) {
@@ -129,6 +133,24 @@ function getPointsAndTooltipsForMessagePathItem(
       };
       points.push({ x, y });
       tooltips.push(tooltip);
+    } else if (path.endsWith(".@length") && typeof (value: any)?.length === "number") {
+      const valueNum: number = Number((value: any)?.length);
+      if (!isNaN(valueNum)) {
+        const x = getXForPoint(xAxisVal, elapsedTime, innerIdx, xAxisRanges, xItem, xAxisPath);
+        const y = valueNum;
+        const tooltip: TimeBasedChartTooltipData = {
+          x,
+          y,
+          datasetKey,
+          item: yItem,
+          path: queriedPath,
+          value: valueNum,
+          constantName,
+          startTime,
+        };
+        points.push({ x, y });
+        tooltips.push(tooltip);
+      }
     }
   }
   const hasMismatchedData =
@@ -170,13 +192,18 @@ function getDatasetAndTooltipsFromMessagePlotPath(
         xItem,
         startTime,
         path.timestampMethod,
+        path.value,
         xAxisVal,
         xAxisPath,
         xAxisRanges,
         datasetKey
       );
-      rangePoints.push(...itemPoints);
-      rangeTooltips.push(...itemTooltips);
+      for (const point of itemPoints) {
+        rangePoints.push(point);
+      }
+      for (const tooltip of itemTooltips) {
+        rangeTooltips.push(tooltip);
+      }
       hasMismatchedData = hasMismatchedData || itemHasMistmatchedData;
       // If we have added more than one point for this message, make it a scatter plot.
       if (item.queriedData.length > 1 && xAxisVal !== "index") {
@@ -187,7 +214,7 @@ function getDatasetAndTooltipsFromMessagePlotPath(
     rangesOfPoints.push(rangePoints);
   }
 
-  if (path.value.includes(".@derivative")) {
+  if (path.value.endsWith(".@derivative")) {
     if (showLine) {
       const newRangesOfTooltips = [];
       const newRangesOfPoints = [];
@@ -204,6 +231,13 @@ function getDatasetAndTooltipsFromMessagePlotPath(
       // (nothing is better than incorrect data).
       rangesOfPoints = [];
       rangesOfTooltips = [];
+    }
+  }
+  for (const funcName of Object.keys(mathFunctions)) {
+    if (path.value.endsWith(`.@${funcName}`)) {
+      rangesOfPoints = rangesOfPoints.map((points) => applyToDataOrTooltips(points, mathFunctions[funcName]));
+      rangesOfTooltips = rangesOfTooltips.map((tooltips) => applyToDataOrTooltips(tooltips, mathFunctions[funcName]));
+      break;
     }
   }
 
@@ -290,30 +324,6 @@ function getAnnotations(paths: PlotPath[]) {
   });
 }
 
-type YAxesInterface = {| minY: number, maxY: number, scaleId: string |};
-// min/maxYValue is NaN when it's unset, and an actual number otherwise.
-const yAxes = createSelector<YAxesInterface, _, _, _>(
-  (params) => params,
-  ({ minY, maxY, scaleId }: YAxesInterface) => {
-    const min = isNaN(minY) ? undefined : minY;
-    const max = isNaN(maxY) ? undefined : maxY;
-    return [
-      {
-        id: scaleId,
-        ticks: {
-          min,
-          max,
-          precision: 3,
-        },
-        gridLines: {
-          color: "rgba(255, 255, 255, 0.2)",
-          zeroLineColor: "rgba(255, 255, 255, 0.2)",
-        },
-      },
-    ];
-  }
-);
-
 type PlotChartProps = {|
   paths: PlotPath[],
   minYValue: number,
@@ -339,7 +349,28 @@ export default memo<PlotChartProps>(function PlotChart(props: PlotChartProps) {
     tooltips,
     xAxisVal,
   } = props;
-  const annotations = getAnnotations(paths);
+  const annotations = useMemo(() => getAnnotations(paths), [paths]);
+  const data = useMemo(() => ({ datasets }), [datasets]);
+  const yAxes = useMemo(() => {
+    const min = isNaN(minYValue) ? undefined : minYValue;
+    const max = isNaN(maxYValue) ? undefined : maxYValue;
+    return [
+      {
+        id: Y_AXIS_ID,
+        ticks: {
+          min,
+          max,
+          precision: 3,
+        },
+        gridLines: {
+          color: "rgba(255, 255, 255, 0.2)",
+          zeroLineColor: "rgba(255, 255, 255, 0.2)",
+        },
+      },
+    ];
+  }, [maxYValue, minYValue]);
+
+  const chartRenderPath = useExperimentalFeature("useGLChartInPlotPanel") ? "webgl" : "chartjs";
 
   return (
     <div className={styles.root}>
@@ -352,17 +383,18 @@ export default memo<PlotChartProps>(function PlotChart(props: PlotChartProps) {
             zoom
             width={width}
             height={height}
-            data={{ datasets }}
+            data={data}
             tooltips={tooltips}
             annotations={annotations}
             type="scatter"
-            yAxes={yAxes({ minY: minYValue, maxY: maxYValue, scaleId: Y_AXIS_ID })}
+            yAxes={yAxes}
             saveCurrentView={saveCurrentView}
             xAxisIsPlaybackTime={xAxisVal === "timestamp"}
             scaleOptions={scaleOptions}
             currentTime={currentTime}
             defaultView={defaultView}
             onClick={onClick}
+            renderPath={chartRenderPath}
           />
         )}
       </Dimensions>

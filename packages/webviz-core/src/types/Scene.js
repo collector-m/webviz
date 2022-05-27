@@ -24,12 +24,13 @@ import type {
   PointCloud,
   LaserScan,
   InstancedLineListMarker,
+  OverlayIconMarker,
+  RadarPointCluster,
 } from "webviz-core/src/types/Messages";
-import Bounds from "webviz-core/src/util/Bounds";
 
 export type Scene = {|
   flattenedZHeightPose: ?Pose,
-  bounds: Bounds,
+  minZ: number,
 |};
 
 export interface MarkerCollector {
@@ -51,6 +52,8 @@ export interface MarkerCollector {
   linedConvexHull(LineListMarker | LineStripMarker): any;
   filledPolygon(FilledPolygonMarker): any;
   instancedLineList(InstancedLineListMarker): any;
+  overlayIcon(OverlayIconMarker): any;
+  radarPointCluster(RadarPointCluster): any;
 }
 
 export interface MarkerProvider {

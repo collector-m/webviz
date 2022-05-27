@@ -89,6 +89,8 @@ export default function sendNotification(
   type: NotificationType,
   severity: NotificationSeverity
 ): void {
+  addNotification(message, details, type, severity);
+
   // We only want to send non-user errors and warnings to Sentry
   if (type === "app") {
     const sentrySeverity = severity === "error" ? Severity.Error : severity === "warn" ? Severity.Warning : null;
@@ -96,8 +98,12 @@ export default function sendNotification(
       Sentry.captureException(new AppError(details, message), sentrySeverity);
     }
   }
+}
 
-  addNotification(message, details, type, severity);
+// Allows the runInBrowser code to hook into the notification system
+// in order to distinguish between user and app errors.
+if (typeof window !== "undefined") {
+  window.setNotificationHandler = setNotificationHandler;
 }
 
 sendNotification.expectCalledDuringTest = () => {}; // Overridden in tests; added here so Flow doesn't complain.

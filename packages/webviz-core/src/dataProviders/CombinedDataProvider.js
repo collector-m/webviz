@@ -6,24 +6,32 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { assign, flatten, isEqual } from "lodash";
+import { assign, flatten, isEqual, uniqBy } from "lodash";
 import memoizeWeak from "memoize-weak";
-import { TimeUtil, type Time } from "rosbag";
+import allSettled from "promise.allsettled";
+import { TimeUtil, type Time, type RosMsgField } from "rosbag";
 
+import rawMessageDefinitionsToParsed from "./rawMessageDefinitionsToParsed";
 import type { BlockCache } from "webviz-core/src/dataProviders/MemoryCacheDataProvider";
 import type {
   DataProviderDescriptor,
   ExtensionPoint,
   GetDataProvider,
+  GetMessagesResult,
+  GetMessagesTopics,
   InitializationResult,
   DataProvider,
+  MessageDefinitions,
+  ParsedMessageDefinitions,
 } from "webviz-core/src/dataProviders/types";
-import type { Message, Progress } from "webviz-core/src/players/types";
-import type { RosMsgField } from "webviz-core/src/types/RosDatatypes";
+import type { Message, Progress, Topic } from "webviz-core/src/players/types";
+import { objectValues } from "webviz-core/src/util";
 import { deepIntersect } from "webviz-core/src/util/ranges";
+import sendNotification from "webviz-core/src/util/sendNotification";
 import { clampTime } from "webviz-core/src/util/time";
 
 const sortTimes = (times: Time[]) => times.sort(TimeUtil.compare);
+const emptyGetMessagesResult = { rosBinaryMessages: undefined, bobjects: undefined, parsedMessages: undefined };
 
 const memoizedMergedBlock = memoizeWeak((block1, block2) => {
   if (block1 == null) {
@@ -59,7 +67,13 @@ export const mergedBlocks = (cache1: ?BlockCache, cache2: ?BlockCache): ?BlockCa
   return { blocks, startTime: cache1.startTime };
 };
 
-const merge = (messages1: Message[], messages2: Message[]) => {
+const merge = (messages1: ?$ReadOnlyArray<Message>, messages2: ?$ReadOnlyArray<Message>) => {
+  if (messages1 == null) {
+    return messages2;
+  }
+  if (messages2 == null) {
+    return messages1;
+  }
   const messages = [];
   let index1 = 0;
   let index2 = 0;
@@ -79,13 +93,11 @@ const merge = (messages1: Message[], messages2: Message[]) => {
   return messages;
 };
 
-const throwOnDuplicateTopics = (topics: string[]) => {
-  [...topics].sort().forEach((topicName, i, sortedTopics) => {
-    if (sortedTopics[i + 1] && topicName === sortedTopics[i + 1]) {
-      throw new Error(`Duplicate topic found: ${topicName}`);
-    }
-  });
-};
+const mergeAllMessageTypes = (result1: GetMessagesResult, result2: GetMessagesResult): GetMessagesResult => ({
+  bobjects: merge(result1.bobjects, result2.bobjects),
+  parsedMessages: merge(result1.parsedMessages, result2.parsedMessages),
+  rosBinaryMessages: merge(result1.rosBinaryMessages, result2.rosBinaryMessages),
+});
 
 const throwOnUnequalDatatypes = (datatypes: [string, RosMsgField[]][]) => {
   datatypes
@@ -104,6 +116,27 @@ const throwOnUnequalDatatypes = (datatypes: [string, RosMsgField[]][]) => {
       }
     });
 };
+// We parse all message definitions here and then merge them.
+function mergeMessageDefinitions(messageDefinitionArr: MessageDefinitions[], topicsArr: Topic[][]): MessageDefinitions {
+  const parsedMessageDefinitionArr: ParsedMessageDefinitions[] = messageDefinitionArr.map((messageDefinitions, index) =>
+    rawMessageDefinitionsToParsed(messageDefinitions, topicsArr[index])
+  );
+  // $FlowFixMe - flow does not work with Object.entries :(
+  throwOnUnequalDatatypes(flatten(parsedMessageDefinitionArr.map(({ datatypes }) => Object.entries(datatypes))));
+
+  return {
+    type: "parsed",
+    messageDefinitionsByTopic: assign(
+      {},
+      ...parsedMessageDefinitionArr.map(({ messageDefinitionsByTopic }) => messageDefinitionsByTopic)
+    ),
+    parsedMessageDefinitionsByTopic: assign(
+      {},
+      ...parsedMessageDefinitionArr.map(({ parsedMessageDefinitionsByTopic }) => parsedMessageDefinitionsByTopic)
+    ),
+    datatypes: assign({}, ...parsedMessageDefinitionArr.map(({ datatypes }) => datatypes)),
+  };
+}
 
 const throwOnMixedParsedMessages = (childProvidesParsedMessages: boolean[]) => {
   if (childProvidesParsedMessages.includes(true) && childProvidesParsedMessages.includes(false)) {
@@ -133,11 +166,18 @@ function fullyLoadedProgress() {
   return { fullyLoadedFractionRanges: [{ start: 0, end: 1 }] };
 }
 
+type ProcessedInitializationResult = $ReadOnly<{|
+  start: Time,
+  end: Time,
+  topicSet: Set<string>,
+|}>;
+
 // A DataProvider that combines multiple underlying DataProviders, optionally adding topic prefixes
 // or removing certain topics.
 export default class CombinedDataProvider implements DataProvider {
   _providers: DataProvider[];
-  _initializationResultsPerProvider: { start: Time, end: Time, topicSet: Set<string> }[] = [];
+  // Initialization result will be null for providers that don't successfully initialize.
+  _initializationResultsPerProvider: (?ProcessedInitializationResult)[] = [];
   _progressPerProvider: (Progress | null)[];
   _extensionPoint: ExtensionPoint;
 
@@ -153,27 +193,27 @@ export default class CombinedDataProvider implements DataProvider {
 
   async initialize(extensionPoint: ExtensionPoint): Promise<InitializationResult> {
     this._extensionPoint = extensionPoint;
-    const results: InitializationResult[] = [];
-    this._initializationResultsPerProvider = [];
-    // NOTE: Initialization is done serially instead of concurrently here as a
-    // temporary workaround for a major IndexedDB bug that results in runaway
-    // disk usage. See https://bugs.chromium.org/p/chromium/issues/detail?id=1035025
-    for (let idx = 0; idx < this._providers.length; idx++) {
-      const provider = this._providers[idx];
-      const childExtensionPoint = {
+
+    const providerInitializePromises = this._providers.map(async (provider, idx) => {
+      return provider.initialize({
+        ...extensionPoint,
         progressCallback: (progress: Progress) => {
           this._updateProgressForChild(idx, progress);
         },
-        reportMetadataCallback: extensionPoint.reportMetadataCallback,
-      };
-      const result = await provider.initialize(childExtensionPoint);
-      results.push(result);
-
-      this._initializationResultsPerProvider.push({
-        start: result.start,
-        end: result.end,
-        topicSet: new Set(result.topics.map((t) => t.name)),
       });
+    });
+    const initializeOutcomes = await allSettled(providerInitializePromises);
+    const results = initializeOutcomes.filter(({ status }) => status === "fulfilled").map(({ value }) => value);
+    this._initializationResultsPerProvider = initializeOutcomes.map((outcome) => {
+      if (outcome.status === "fulfilled") {
+        const { start, end, topics } = outcome.value;
+        return { start, end, topicSet: new Set(topics.map((t) => t.name)) };
+      }
+      sendNotification("Data unavailable", outcome.reason, "user", "warn");
+      return null;
+    });
+    if (initializeOutcomes.every(({ status }) => status === "rejected")) {
+      return new Promise(() => {}); // Just never finish initializing.
     }
 
     // Any providers that didn't report progress in `initialize` are assumed fully loaded
@@ -185,25 +225,19 @@ export default class CombinedDataProvider implements DataProvider {
     const end = sortTimes(results.map((result) => result.end)).pop();
 
     // Error handling
-    const mergedTopics = flatten(results.map(({ topics }) => topics));
-    throwOnDuplicateTopics(mergedTopics.map(({ name }) => name));
-    throwOnDuplicateTopics(
-      flatten(results.map(({ messageDefinitionsByTopic }) => Object.keys(messageDefinitionsByTopic)))
-    );
-    // $FlowFixMe - flow does not work with Object.entries :(
-    throwOnUnequalDatatypes(flatten(results.map(({ datatypes }) => Object.entries(datatypes))));
+    const mergedTopics = uniqBy(flatten(results.map(({ topics }) => topics)), ({ name }) => name);
     throwOnMixedParsedMessages(results.map(({ providesParsedMessages }) => providesParsedMessages));
+    const combinedMessageDefinitions = mergeMessageDefinitions(
+      results.map(({ messageDefinitions }) => messageDefinitions),
+      results.map(({ topics }) => topics)
+    );
 
     return {
       start,
       end,
       topics: mergedTopics,
-      datatypes: assign({}, ...results.map(({ datatypes }) => datatypes)),
-      providesParsedMessages: results.length ? results[0].providesParsedMessages : true,
-      messageDefinitionsByTopic: assign(
-        {},
-        ...results.map(({ messageDefinitionsByTopic }) => messageDefinitionsByTopic)
-      ),
+      providesParsedMessages: results.length ? results[0].providesParsedMessages : false,
+      messageDefinitions: combinedMessageDefinitions,
     };
   }
 
@@ -211,41 +245,55 @@ export default class CombinedDataProvider implements DataProvider {
     await Promise.all(this._providers.map((provider) => provider.close()));
   }
 
-  async getMessages(start: Time, end: Time, topics: string[]): Promise<Message[]> {
+  async getMessages(start: Time, end: Time, topics: GetMessagesTopics): Promise<GetMessagesResult> {
     const messagesPerProvider = await Promise.all(
       this._providers.map(async (provider, index) => {
         const initializationResult = this._initializationResultsPerProvider[index];
+        if (initializationResult == null) {
+          return { bobjects: undefined, parsedMessages: undefined, rosBinaryMessages: undefined };
+        }
         const availableTopics = initializationResult.topicSet;
-        const filteredTopics = topics.filter((topic) => availableTopics.has(topic));
-        if (!filteredTopics.length) {
+        const filterTopics = (maybeTopics) => maybeTopics && maybeTopics.filter((topic) => availableTopics.has(topic));
+        const filteredTopicsByFormat = {
+          bobjects: filterTopics(topics.bobjects),
+          parsedMessages: filterTopics(topics.parsedMessages),
+          rosBinaryMessages: filterTopics(topics.rosBinaryMessages),
+        };
+        const hasSubscriptions = objectValues(filteredTopicsByFormat).some((formatTopics) => formatTopics?.length);
+        if (!hasSubscriptions) {
           // If we don't need any topics from this provider, we shouldn't call getMessages at all.  Therefore,
           // the provider doesn't know that we currently don't care about any of its topics, so it won't report
           // its progress as being fully loaded, so we'll have to do that here ourselves.
           this._updateProgressForChild(index, fullyLoadedProgress());
-          return [];
+          return emptyGetMessagesResult;
         }
         if (
           TimeUtil.isLessThan(end, initializationResult.start) ||
           TimeUtil.isLessThan(initializationResult.end, start)
         ) {
           // If we're totally out of bounds for this provider, we shouldn't call getMessages at all.
-          return [];
+          return emptyGetMessagesResult;
         }
         const clampedStart = clampTime(start, initializationResult.start, initializationResult.end);
         const clampedEnd = clampTime(end, initializationResult.start, initializationResult.end);
-        const messages = await provider.getMessages(clampedStart, clampedEnd, filteredTopics);
-        for (const message of messages) {
-          if (!availableTopics.has(message.topic)) {
-            throw new Error(`Saw unexpected topic from provider ${index}: ${message.topic}`);
+        const providerResult = await provider.getMessages(clampedStart, clampedEnd, filteredTopicsByFormat);
+        for (const messages of objectValues(providerResult)) {
+          if (messages == null) {
+            continue;
+          }
+          for (const message of messages) {
+            if (!availableTopics.has(message.topic)) {
+              throw new Error(`Saw unexpected topic from provider ${index}: ${message.topic}`);
+            }
           }
         }
-        return messages;
+        return providerResult;
       })
     );
 
-    let mergedMessages = [];
+    let mergedMessages = emptyGetMessagesResult;
     for (const messages of messagesPerProvider) {
-      mergedMessages = merge(mergedMessages, messages);
+      mergedMessages = mergeAllMessageTypes(mergedMessages, messages);
     }
     return mergedMessages;
   }

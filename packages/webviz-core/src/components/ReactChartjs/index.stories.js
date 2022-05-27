@@ -10,7 +10,8 @@ import cloneDeep from "lodash/cloneDeep";
 import React, { useState, useCallback } from "react";
 import TestUtils from "react-dom/test-utils";
 
-import ChartComponent from ".";
+import ChartComponent, { DEFAULT_PROPS } from ".";
+import { MockMessagePipelineProvider } from "webviz-core/src/components/MessagePipeline";
 
 const dataPoint = {
   x: 0.000057603000000000004,
@@ -29,7 +30,6 @@ const props = {
         label: "/turtle1/pose.x",
         key: "0",
         showLine: true,
-        fill: false,
         borderWidth: 1,
         pointRadius: 1.5,
         pointHoverRadius: 3,
@@ -82,6 +82,9 @@ const props = {
     },
   },
   type: "scatter",
+  zoomOptions: DEFAULT_PROPS.zoomOptions,
+  panOptions: DEFAULT_PROPS.panOptions,
+  callbacksRef: { current: null },
 };
 
 const propsWithDatalabels = cloneDeep(props);
@@ -101,24 +104,23 @@ function DatalabelUpdateExample({ forceDisableWorkerRendering }: { forceDisableW
   }
   return (
     <div style={divStyle} ref={refFn}>
-      <ChartComponent {...chartProps} forceDisableWorkerRendering={forceDisableWorkerRendering} />
+      <MockMessagePipelineProvider>
+        <ChartComponent {...chartProps} forceDisableWorkerRendering={forceDisableWorkerRendering} />
+      </MockMessagePipelineProvider>
     </div>
   );
 }
 
 function DatalabelClickExample() {
   const [clickedDatalabel, setClickedDatalabel] = useState<any>(null);
-  const refFn = useCallback(
-    () => {
-      setTimeout(() => {
-        if (!clickedDatalabel) {
-          const [canvas] = document.getElementsByTagName("canvas");
-          TestUtils.Simulate.click(canvas, { clientX: 245, clientY: 419 });
-        }
-      }, 200);
-    },
-    [clickedDatalabel]
-  );
+  const refFn = useCallback(() => {
+    setTimeout(() => {
+      if (!clickedDatalabel) {
+        const [canvas] = document.getElementsByTagName("canvas");
+        TestUtils.Simulate.click(canvas, { clientX: 245, clientY: 419 });
+      }
+    }, 200);
+  }, [clickedDatalabel]);
 
   return (
     <div style={divStyle} ref={refFn}>
@@ -127,12 +129,14 @@ function DatalabelClickExample() {
           ? `Clicked datalabel with selection id: ${String(clickedDatalabel.selectionObj)}`
           : "Have not clicked datalabel"}
       </div>
-      <ChartComponent
-        {...propsWithDatalabels}
-        onClick={(_, datalabel) => {
-          setClickedDatalabel(datalabel);
-        }}
-      />
+      <MockMessagePipelineProvider>
+        <ChartComponent
+          {...propsWithDatalabels}
+          onClick={(_, datalabel) => {
+            setClickedDatalabel(datalabel);
+          }}
+        />
+      </MockMessagePipelineProvider>
     </div>
   );
 }
@@ -145,14 +149,18 @@ storiesOf("<ChartComponent>", module)
   })
   .add("default", () => (
     <div style={divStyle}>
-      <ChartComponent {...props} />
+      <MockMessagePipelineProvider>
+        <ChartComponent {...props} />
+      </MockMessagePipelineProvider>
     </div>
   ))
   .add("can update", () => <DatalabelUpdateExample forceDisableWorkerRendering={false} />)
   .add("[web worker disabled] can update", () => <DatalabelUpdateExample forceDisableWorkerRendering />)
   .add("with datalabels", () => (
     <div style={divStyle}>
-      <ChartComponent {...propsWithDatalabels} />
+      <MockMessagePipelineProvider>
+        <ChartComponent {...propsWithDatalabels} />
+      </MockMessagePipelineProvider>
     </div>
   ))
   .add("allows clicking on datalabels", () => <DatalabelClickExample />);

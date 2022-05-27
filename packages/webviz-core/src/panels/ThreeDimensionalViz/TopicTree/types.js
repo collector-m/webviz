@@ -60,7 +60,8 @@ export type TreeTopicNode = {|
 export type TreeNode = TreeGroupNode | TreeTopicNode;
 
 export type UseSceneBuilderAndTransformsDataInput = {|
-  sceneBuilder: SceneBuilder,
+  playerId: string,
+  sceneBuilder: ?SceneBuilder,
   staticallyAvailableNamespacesByTopic: NamespacesByTopic,
   transforms: Transforms,
 |};
@@ -87,6 +88,7 @@ export type UseTreeInput = {|
   settingsByKey: { [topicOrNamespaceKey: string]: any },
   topicTreeConfig: TopicTreeConfig, // Never changes!
   uncategorizedGroupName: string,
+  staticallyAvailableNamespacesByTopic: NamespacesByTopic,
 |};
 
 export type GetIsTreeNodeVisibleInScene = (topicNode: TreeNode, columnIndex: number, namespaceKey?: string) => boolean;

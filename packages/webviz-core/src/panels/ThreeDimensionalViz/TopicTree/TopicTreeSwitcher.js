@@ -19,10 +19,13 @@ import { colors } from "webviz-core/src/util/sharedStyleConstants";
 
 export const SWITCHER_HEIGHT = 30;
 const STopicTreeSwitcher = styled.div`
-  width: 56px;
+  width: 28px;
   display: flex;
   height: ${SWITCHER_HEIGHT}px;
   position: relative;
+
+  // We have to re-enable pointer-events here because they are disabled in STopicTreeWrapper
+  pointer-events: auto;
 `;
 
 const SErrorsBadge = styled.div`
@@ -65,36 +68,35 @@ export default function TopicTreeSwitcher({
     <STopicTreeSwitcher>
       <SIconWrapper
         style={{
-          backgroundColor: renderTopicTree ? "transparent" : "#2d2c33",
-          opacity: renderTopicTree ? "0" : "1",
-          transition: `all 0.1s ease-out`,
+          backgroundColor: "#2d2c33",
+          opacity: renderTopicTree ? 0 : 1,
+          transition: `all 0.15s ease-out ${renderTopicTree ? 0 : 0.2}s`,
         }}>
         <Icon
           tooltipProps={{ placement: "top", contents: <KeyboardShortcut keys={["T"]} /> }}
           dataTest="open-topic-picker"
           active={renderTopicTree}
-          fade
           medium
-          onClick={onClick}>
+          onClick={onClick}
+          style={{ color: colors.LIGHT }}>
           <LayersIcon />
         </Icon>
       </SIconWrapper>
       <SIconWrapper
         style={{
-          transform: `translate(0px,${renderTopicTree ? 0 : 28}px)`,
-          opacity: renderTopicTree ? "1" : "0",
-          transition: `all 0.3s ease-in-out`,
+          transform: `translate(0px,${renderTopicTree ? 0 : -28}px)`,
+          opacity: renderTopicTree ? 1 : 0,
+          transition: `all 0.25s ease-in-out`,
           pointerEvents: renderTopicTree ? "unset" : "none",
         }}>
         <Icon
           tooltipProps={{ placement: "top", contents: "Pin topic picker" }}
           small
-          fade
           active={pinTopics}
           onClick={() => {
             // Keep TopicTree open after unpin.
             setShowTopicTree(true);
-            saveConfig({ pinTopics: !pinTopics }, { keepLayoutInUrl: true });
+            saveConfig({ pinTopics: !pinTopics });
           }}
           style={{ color: pinTopics ? colors.HIGHLIGHT : colors.LIGHT }}>
           <PinIcon />

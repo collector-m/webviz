@@ -40,9 +40,11 @@ export function groupLinesIntoInstancedLineLists(
     const allPoints = []; // accumulated positions
     const metadataByIndex = [];
     const poses = [];
+
     for (let messageIdx = 0; messageIdx < messageList.length; messageIdx++) {
       const message = messageList[messageIdx];
-      const { points = [], colors = [] } = message;
+      const points = message.points || [];
+      const colors = message.colors || [];
       if (points.length === 0) {
         // Ignore markers with no points
         continue;
@@ -86,7 +88,7 @@ export function groupLinesIntoInstancedLineLists(
         fillExtend(metadataByIndex, message, points.length);
         fillExtend(poses, message.pose, points.length - (message.poses ? message.poses.length : 0));
 
-        if (baseMessage.closed) {
+        if (message.closed) {
           // If this is a closed marker, we need to add an extra point to generate a new line
           // from the last element to the first one. We also need to add the metadata and a pose
           // that correspond to that point.
@@ -122,11 +124,11 @@ export function groupLinesIntoInstancedLineLists(
         // color for the marker (or a default value)
         fillExtend(allColors, message.color || COLORS.WHITE, lineListPoints.length - lineListColors.length);
 
-        // We have two points per instance.
-        // Save the whole marker as the instanced object so we can display it
-        // to the user after selection.
-        fillExtend(metadataByIndex, message, lineListPoints.length / 2);
-        fillExtend(poses, message.pose, lineListPoints.length / 2);
+        // Both points share the same pose
+        const posesPerInstance = Math.floor(lineListPoints.length / 2);
+        fillExtend(poses, message.pose, posesPerInstance);
+
+        fillExtend(metadataByIndex, message, lineListPoints.length);
       }
     }
 
@@ -139,7 +141,7 @@ export function groupLinesIntoInstancedLineLists(
     }
 
     // Extract common properties from base marker
-    const { header, action, ns, scale } = baseMessage;
+    const { header, action, ns, scale, blend, depth } = baseMessage;
     resultMarkers.push(
       ({
         header,
@@ -150,6 +152,8 @@ export function groupLinesIntoInstancedLineLists(
         colors: allColors,
         points: allPoints,
         poses,
+        blend,
+        depth,
         metadataByIndex,
         id,
         // $FlowFixMe - doesn't understand how to handle the type field in markers

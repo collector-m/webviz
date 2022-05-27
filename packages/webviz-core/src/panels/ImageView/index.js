@@ -12,10 +12,9 @@ import CloseIcon from "@mdi/svg/svg/close.svg";
 import MenuDownIcon from "@mdi/svg/svg/menu-down.svg";
 import WavesIcon from "@mdi/svg/svg/waves.svg";
 import cx from "classnames";
-import { last, uniq } from "lodash";
-import * as React from "react";
+import { uniq, keyBy, partition } from "lodash";
+import React, { useMemo, useCallback, type Node } from "react";
 import { hot } from "react-hot-loader/root";
-import { createSelector } from "reselect";
 import styled from "styled-components";
 
 import ImageCanvas from "./ImageCanvas";
@@ -28,6 +27,7 @@ import ChildToggle from "webviz-core/src/components/ChildToggle";
 import Dropdown from "webviz-core/src/components/Dropdown";
 import dropDownStyles from "webviz-core/src/components/Dropdown/index.module.scss";
 import EmptyState from "webviz-core/src/components/EmptyState";
+import { useExperimentalFeature } from "webviz-core/src/components/ExperimentalFeatures";
 import Flex from "webviz-core/src/components/Flex";
 import Icon from "webviz-core/src/components/Icon";
 import { Item, SubMenu } from "webviz-core/src/components/Menu";
@@ -37,19 +37,21 @@ import PanelToolbar from "webviz-core/src/components/PanelToolbar";
 import filterMap from "webviz-core/src/filterMap";
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
 import * as PanelAPI from "webviz-core/src/PanelAPI";
-import type { Topic, Message, TypedMessage } from "webviz-core/src/players/types";
+import IconTextMenu from "webviz-core/src/panels/ImageView/IconTextMenu";
+import type { Message, TypedMessage } from "webviz-core/src/players/types";
 import inScreenshotTests from "webviz-core/src/stories/inScreenshotTests";
 import colors from "webviz-core/src/styles/colors.module.scss";
 import type { CameraInfo } from "webviz-core/src/types/Messages";
 import type { SaveConfig } from "webviz-core/src/types/panels";
+import { deepParse, maybeGetBobjectHeaderStamp } from "webviz-core/src/util/binaryObjects";
+import { WEBVIZ_ICON_MSGS$WEBVIZ_2D_ICON_ARRAY } from "webviz-core/src/util/globalConstants";
 import { useShallowMemo, useDeepMemo } from "webviz-core/src/util/hooks";
 import naturalSort from "webviz-core/src/util/naturalSort";
 import { getTopicsByTopicName } from "webviz-core/src/util/selectors";
+import { colors as sharedColors } from "webviz-core/src/util/sharedStyleConstants";
 import { getSynchronizingReducers } from "webviz-core/src/util/synchronizeMessages";
 import { formatTimeRaw } from "webviz-core/src/util/time";
 import toggle from "webviz-core/src/util/toggle";
-
-const { useMemo, useCallback } = React;
 
 type DefaultConfig = {|
   cameraTopic: string,
@@ -57,13 +59,17 @@ type DefaultConfig = {|
   customMarkerTopicOptions?: string[],
   scale: number,
   synchronize: boolean,
+  // Use template string to create icon text from the metadata fields of the icon msg.
+  iconTextTemplate?: string,
 |};
 
-export type ImageViewPanelHooks = {
+type ImageViewPanelHooks = {
   defaultConfig: DefaultConfig,
   imageMarkerDatatypes: string[],
 };
+const DEFAULT_PANEL_HOOKS = { imageMarkerDatatypes: [] };
 
+// const IMAGE_ICON_MARKER_DATATYPES = [WEBVIZ_ICON_MSGS$WEBVIZ_2D_ICON_ARRAY];
 export type Config = {|
   ...DefaultConfig,
   panelHooks?: ImageViewPanelHooks,
@@ -87,10 +93,21 @@ const TopicTimestampSpan = styled.span`
   font-style: italic;
 `;
 
+const SEmptyStateWrapper = styled.div`
+  width: 100%;
+  height: 100%;
+  position: absolute;
+  z-index: 200;
+  background: ${sharedColors.DARK};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
 const TopicTimestamp = ({ text, style: styleObj }: { text: string, style?: { [string]: string } }) =>
   text === "" ? null : <TopicTimestampSpan style={styleObj}>{text}</TopicTimestampSpan>;
 
-const BottomBar = ({ children, containsOpen }: { children?: React.Node, containsOpen: boolean }) => (
+const BottomBar = ({ children, containsOpen }: { children?: Node, containsOpen: boolean }) => (
   <div
     className={cx(imageCanvasStyles["bottom-bar"], {
       [imageCanvasStyles.containsOpen]: inScreenshotTests ? true : containsOpen,
@@ -119,15 +136,6 @@ const ToggleComponent = ({
 };
 
 // Group image topics by the first component of their name
-const imageTopicsByNamespaceSelector = createSelector(
-  (topics?: $ReadOnlyArray<Topic>) => topics || [],
-  (topics: $ReadOnlyArray<Topic>): Map<string, Topic[]> => {
-    const imageTopics = topics.filter(
-      (topic) => topic.datatype === "sensor_msgs/Image" || topic.datatype === "sensor_msgs/CompressedImage"
-    );
-    return groupTopics(imageTopics);
-  }
-);
 
 function renderEmptyState(
   cameraTopic: string,
@@ -136,71 +144,45 @@ function renderEmptyState(
   messagesByTopic: { [topic: string]: Message[] }
 ) {
   return (
-    <EmptyState>
-      Waiting for images {markerTopics.length > 0 && "and markers"} on:
-      <ul>
-        <li>
-          <code>{cameraTopic}</code>
-        </li>
-        {markerTopics.sort().map((m) => (
-          <li key={m}>
-            <code>{m}</code>
+    <SEmptyStateWrapper>
+      <EmptyState>
+        Waiting for images {markerTopics.length > 0 && "and markers"} on:
+        <br />
+        <br />
+        <ul>
+          <li>
+            <code>{cameraTopic}</code>
           </li>
-        ))}
-      </ul>
-      {shouldSynchronize && (
-        <>
-          <p>
-            Synchronization is enabled, so all messages with <code>header.stamp</code>s must match exactly.
-          </p>
-          <ul>
-            {Object.keys(messagesByTopic).map((topic) => (
-              <li key={topic}>
-                <code>{topic}</code>:{" "}
-                {messagesByTopic[topic] && messagesByTopic[topic].length
-                  ? messagesByTopic[topic]
-                      .map(({ message }) =>
-                        // In some cases, a user may have subscribed to a topic that does not include a header stamp.
-                        message?.header?.stamp ? formatTimeRaw(message.header.stamp) : "[ unknown ]"
-                      )
-                      .join(", ")
-                  : "no messages"}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-    </EmptyState>
+          {markerTopics.sort().map((m) => (
+            <li key={m}>
+              <code>{m}</code>
+            </li>
+          ))}
+        </ul>
+        {shouldSynchronize && (
+          <>
+            <p>Synchronization is enabled, so all messages with `header.stamp`s must match exactly.</p>
+            <ul>
+              {Object.keys(messagesByTopic).map((topic) => (
+                <li key={topic}>
+                  <code>{topic}</code>:{" "}
+                  {messagesByTopic[topic] && messagesByTopic[topic].length
+                    ? messagesByTopic[topic]
+                        .map(({ message }) => {
+                          const stamp = maybeGetBobjectHeaderStamp(message);
+                          // In some cases, a user may have subscribed to a topic that does not include a header stamp.
+                          return stamp ? formatTimeRaw(stamp) : "[ unknown ]";
+                        })
+                        .join(", ")
+                    : "no messages"}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </EmptyState>
+    </SEmptyStateWrapper>
   );
-}
-
-function useOptionallySynchronizedMessages(
-  shouldSynchronize: boolean,
-  topics: $ReadOnlyArray<PanelAPI.RequestedTopic>
-) {
-  const memoizedTopics = useDeepMemo(topics);
-  const reducers = useMemo(
-    () =>
-      shouldSynchronize
-        ? getSynchronizingReducers(
-            memoizedTopics.map((request) => (typeof request === "string" ? request : request.topic))
-          )
-        : {
-            restore: (previousValue) => ({
-              messagesByTopic: previousValue ? previousValue.messagesByTopic : {},
-              synchronizedMessages: null,
-            }),
-            addMessage: ({ messagesByTopic }, newMessage) => ({
-              messagesByTopic: { ...messagesByTopic, [newMessage.topic]: [newMessage] },
-              synchronizedMessages: null,
-            }),
-          },
-    [shouldSynchronize, memoizedTopics]
-  );
-  return PanelAPI.useMessageReducer({
-    topics,
-    ...reducers,
-  });
 }
 
 const AddTopic = ({ onSelectTopic, topics }: { onSelectTopic: (string) => void, topics: string[] }) => {
@@ -217,6 +199,8 @@ const AddTopic = ({ onSelectTopic, topics }: { onSelectTopic: (string) => void, 
   );
 };
 
+const NO_CUSTOM_OPTIONS = [];
+
 function ImageView(props: Props) {
   const { config, saveConfig } = props;
   const {
@@ -226,67 +210,68 @@ function ImageView(props: Props) {
     enabledMarkerTopics,
     panelHooks,
     transformMarkers,
-    customMarkerTopicOptions = [],
+    customMarkerTopicOptions = NO_CUSTOM_OPTIONS,
+    iconTextTemplate,
   } = config;
   const { topics } = PanelAPI.useDataSourceInfo();
+  // For looking up datatype by topic name.
+  const topicsKeyByTopicName = useMemo(() => keyBy(topics, "name"), [topics]);
+  const isDemoMode = useExperimentalFeature("demoMode");
   const cameraTopicFullObject = useMemo(() => getTopicsByTopicName(topics)[cameraTopic], [cameraTopic, topics]);
 
-  const imageTopicsByNamespace = imageTopicsByNamespaceSelector(topics);
-  // Represents marker topics based on the camera topic prefix (e.g. "/camera_front_medium")
-  const allCameraNamespaces = imageTopicsByNamespace ? [...imageTopicsByNamespace.keys()] : [];
+  // Namespaces represent marker topics based on the camera topic prefix (e.g. "/camera_front_medium")
+  const { allCameraNamespaces, imageTopicsByNamespace } = useMemo(() => {
+    const imageTopics = (topics ?? []).filter(({ datatype }) =>
+      ["sensor_msgs/Image", "sensor_msgs/CompressedImage"].includes(datatype)
+    );
+    const topicsByNamespace = groupTopics(imageTopics);
+    return { imageTopicsByNamespace: topicsByNamespace, allCameraNamespaces: [...topicsByNamespace.keys()] };
+  }, [topics]);
 
-  const { imageMarkerDatatypes } = panelHooks ||
-    getGlobalHooks().perPanelHooks().ImageView || { imageMarkerDatatypes: [] };
-  const defaultAvailableMarkerTopics = getMarkerOptions(cameraTopic, topics, allCameraNamespaces, imageMarkerDatatypes);
-  const availableAndEnabledMarkerTopics = uniq([
-    ...defaultAvailableMarkerTopics,
-    ...customMarkerTopicOptions,
-    ...enabledMarkerTopics,
-  ]).sort();
-  const onToggleMarkerName = useCallback(
-    (markerTopic: string) => {
-      saveConfig({ enabledMarkerTopics: toggle(enabledMarkerTopics, markerTopic) });
-    },
-    [saveConfig, enabledMarkerTopics]
+  const { imageMarkerDatatypes } = panelHooks || getGlobalHooks().perPanelHooks().ImageView || DEFAULT_PANEL_HOOKS;
+
+  const combinedImageMarkerDataTypes = useMemo(() => [...imageMarkerDatatypes, WEBVIZ_ICON_MSGS$WEBVIZ_2D_ICON_ARRAY], [
+    imageMarkerDatatypes,
+  ]);
+  const defaultAvailableMarkerTopics = useMemo(
+    () => getMarkerOptions(cameraTopic, topics, allCameraNamespaces, combinedImageMarkerDataTypes),
+    [cameraTopic, topics, allCameraNamespaces, combinedImageMarkerDataTypes]
   );
-
-  const onChangeCameraTopic = useCallback(
-    (newCameraTopic: string) => {
-      const newAvailableMarkerTopics = getMarkerOptions(
-        newCameraTopic,
-        topics,
-        allCameraNamespaces,
-        imageMarkerDatatypes
-      );
-
-      const newEnabledMarkerTopics = getRelatedMarkerTopics(enabledMarkerTopics, newAvailableMarkerTopics);
-      saveConfig({
-        cameraTopic: newCameraTopic,
-        transformMarkers: getGlobalHooks()
-          .perPanelHooks()
-          .ImageView.canTransformMarkersByTopic(newCameraTopic),
-
-        enabledMarkerTopics: newEnabledMarkerTopics,
-      });
-    },
-    [topics, allCameraNamespaces, imageMarkerDatatypes, enabledMarkerTopics, saveConfig]
+  const availableAndEnabledMarkerTopics = useShallowMemo(
+    uniq([...defaultAvailableMarkerTopics, ...customMarkerTopicOptions, ...enabledMarkerTopics]).sort()
   );
+  const onToggleMarkerName = useCallback((markerTopic: string) => {
+    saveConfig({ enabledMarkerTopics: toggle(enabledMarkerTopics, markerTopic) });
+  }, [saveConfig, enabledMarkerTopics]);
 
-  const onChangeScale = useCallback(
-    (newScale: number) => {
-      saveConfig({ scale: newScale });
-    },
-    [saveConfig]
-  );
+  const onChangeCameraTopic = useCallback((newCameraTopic: string) => {
+    const newAvailableMarkerTopics = getMarkerOptions(
+      newCameraTopic,
+      topics,
+      allCameraNamespaces,
+      combinedImageMarkerDataTypes
+    );
 
-  const onToggleSynchronize = useCallback(
-    () => {
-      saveConfig({ synchronize: !config.synchronize });
-    },
-    [saveConfig, config.synchronize]
-  );
+    const newEnabledMarkerTopics = getRelatedMarkerTopics(enabledMarkerTopics, newAvailableMarkerTopics);
+    saveConfig({
+      cameraTopic: newCameraTopic,
+      transformMarkers: getGlobalHooks()
+        .perPanelHooks()
+        .ImageView.canTransformMarkersByTopic(newCameraTopic),
 
-  const renderImageTopicDropdown = () => {
+      enabledMarkerTopics: newEnabledMarkerTopics,
+    });
+  }, [topics, allCameraNamespaces, combinedImageMarkerDataTypes, enabledMarkerTopics, saveConfig]);
+
+  const onChangeScale = useCallback((newScale: number) => {
+    saveConfig({ scale: newScale });
+  }, [saveConfig]);
+
+  const onToggleSynchronize = useCallback(() => {
+    saveConfig({ synchronize: !synchronize });
+  }, [saveConfig, synchronize]);
+
+  const imageTopicDropdown = useMemo(() => {
     const cameraNamespace = getCameraNamespace(cameraTopic);
 
     if (!imageTopicsByNamespace || imageTopicsByNamespace.size === 0) {
@@ -331,11 +316,95 @@ function ImageView(props: Props) {
     return (
       <Dropdown toggleComponent={<ToggleComponent dataTest={"topics-dropdown"} text={cameraTopic} />}>{items}</Dropdown>
     );
+  }, [cameraTopic, imageTopicsByNamespace, onChangeCameraTopic]);
+
+  const cameraInfoTopic = getCameraInfoTopic(cameraTopic);
+  const cameraInfo: ?CameraInfo = PanelAPI.useMessageReducer({
+    topics: cameraInfoTopic ? [cameraInfoTopic] : [],
+    restore: useCallback((value) => value, []),
+    addMessage: useCallback((value, { message }: TypedMessage<CameraInfo>) => message, []),
+  });
+
+  const shouldSynchronize = synchronize && enabledMarkerTopics.length > 0;
+  const imageAndMarkerTopics = useDeepMemo([{ topic: cameraTopic, imageScale: scale }, ...enabledMarkerTopics]);
+
+  const { messagesByTopic: pendingSynchronizedMessages, synchronizedMessages } = PanelAPI.useMessageReducer({
+    topics: imageAndMarkerTopics,
+    ...useMemo(
+      () =>
+        getSynchronizingReducers(
+          imageAndMarkerTopics.map((request) => (typeof request === "string" ? request : request.topic))
+        ),
+      [imageAndMarkerTopics]
+    ),
+  });
+  const unsynchronizedMessages = PanelAPI.useMessageReducer({
+    topics: imageAndMarkerTopics,
+    restore: useCallback((previousValue) => previousValue ?? {}, []),
+    addBobjects: useCallback((oldState, newBobjects) => {
+      const newState = { ...oldState };
+      newBobjects.forEach((bobject) => {
+        newState[bobject.topic] = bobject;
+      });
+      return newState;
+    }, []),
+  });
+  const bobjectFrame = shouldSynchronize ? synchronizedMessages : unsynchronizedMessages;
+  // TODO(steel): Move the parsing into the worker.
+  const parsedFrame = useMemo(() => {
+    if (bobjectFrame == null) {
+      return bobjectFrame;
+    }
+    const ret = {};
+    Object.keys(bobjectFrame).forEach((topic) => {
+      const { message, receiveTime } = bobjectFrame[topic];
+      ret[topic] = { message: deepParse(message), topic, receiveTime };
+    });
+    return ret;
+  }, [bobjectFrame]);
+
+  const { iconMarkersToRender, nonIconMarkersToRender } = useMemo(() => {
+    const combinedMarkers: Message[] = filterMap(enabledMarkerTopics, (topic) => parsedFrame?.[topic]);
+    const [iconMarkers, nonIconMarkers] = partition(combinedMarkers, ({ topic }) => {
+      return topicsKeyByTopicName[topic].datatype === WEBVIZ_ICON_MSGS$WEBVIZ_2D_ICON_ARRAY;
+    });
+    return { iconMarkersToRender: iconMarkers, nonIconMarkersToRender: nonIconMarkers };
+  }, [enabledMarkerTopics, parsedFrame, topicsKeyByTopicName]);
+
+  // Timestamps are displayed for informational purposes in the markers menu
+  const renderedMarkerTimestamps = useMemo(() => {
+    const stamps = {};
+    for (const { topic, message } of nonIconMarkersToRender) {
+      // In some cases, a user may have subscribed to a topic that does not include a header stamp.
+      stamps[topic] = message?.header?.stamp ? formatTimeRaw(message.header.stamp) : "[ not available ]";
+    }
+    return stamps;
+  }, [nonIconMarkersToRender]);
+
+  const rawMarkerData = {
+    markers: nonIconMarkersToRender,
+    scale,
+    transformMarkers,
+    cameraInfo: nonIconMarkersToRender.length > 0 ? cameraInfo : null,
   };
 
-  const renderMarkerDropdown = (cameraInfo: ?CameraInfo, renderedMarkerTimestamps: { [topic: string]: string }) => {
-    const missingRequiredCameraInfo = scale !== 1 && !cameraInfo;
+  const addTopicsMenu = useMemo(
+    () => (
+      <AddTopic
+        topics={topics.map(({ name }) => name).filter((topic) => !availableAndEnabledMarkerTopics.includes(topic))}
+        onSelectTopic={(topic) =>
+          saveConfig({
+            enabledMarkerTopics: [...enabledMarkerTopics, topic],
+            customMarkerTopicOptions: [...customMarkerTopicOptions, topic],
+          })
+        }
+      />
+    ),
+    [topics, availableAndEnabledMarkerTopics, saveConfig, enabledMarkerTopics, customMarkerTopicOptions]
+  );
 
+  const markerDropdown = useMemo(() => {
+    const missingRequiredCameraInfo = scale !== 1 && !cameraInfo;
     return (
       <Dropdown
         dataTest={"markers-dropdown"}
@@ -371,20 +440,24 @@ function ImageView(props: Props) {
             )}
           </Item>
         ))}
-        {
-          <AddTopic
-            topics={topics.map(({ name }) => name).filter((topic) => !availableAndEnabledMarkerTopics.includes(topic))}
-            onSelectTopic={(topic) =>
-              saveConfig({
-                enabledMarkerTopics: [...enabledMarkerTopics, topic],
-                customMarkerTopicOptions: [...customMarkerTopicOptions, topic],
-              })
-            }
-          />
-        }
+        {addTopicsMenu}
       </Dropdown>
     );
-  };
+  }, [
+    addTopicsMenu,
+    availableAndEnabledMarkerTopics,
+    cameraInfo,
+    customMarkerTopicOptions,
+    enabledMarkerTopics,
+    onToggleMarkerName,
+    renderedMarkerTimestamps,
+    saveConfig,
+    scale,
+  ]);
+
+  const onIconTextChange = useCallback((newVal: string) => {
+    saveConfig({ iconTextTemplate: newVal });
+  }, [saveConfig]);
 
   const menuContent = useMemo(
     () => (
@@ -392,6 +465,8 @@ function ImageView(props: Props) {
         <Item icon={synchronize ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />} onClick={onToggleSynchronize}>
           <span>Synchronize images and markers</span>
         </Item>
+        <IconTextMenu value={iconTextTemplate || ""} onChange={onIconTextChange} />
+
         <hr />
         <SubMenu direction="right" text={`Image resolution: ${(scale * 100).toFixed()}%`}>
           {[0.2, 0.5, 1].map((value) => {
@@ -404,97 +479,42 @@ function ImageView(props: Props) {
         </SubMenu>
       </>
     ),
-    [scale, onChangeScale, synchronize, onToggleSynchronize]
+    [synchronize, onToggleSynchronize, iconTextTemplate, onIconTextChange, scale, onChangeScale]
   );
 
-  const cameraInfoTopic = getCameraInfoTopic(cameraTopic);
-  const cameraInfo: ?CameraInfo = PanelAPI.useMessageReducer({
-    topics: cameraInfoTopic ? [cameraInfoTopic] : [],
-    restore: useCallback((value) => value, []),
-    addMessage: useCallback((value, { message }: TypedMessage<CameraInfo>) => message, []),
-  });
+  const imageMessage = parsedFrame?.[cameraTopic];
+  const lastImageMessageRef = React.useRef(imageMessage);
+  if (imageMessage) {
+    lastImageMessageRef.current = imageMessage;
+  }
+  // Keep the last image message, if it exists, to render on the ImageCanvas.
+  // Improve perf by hiding the ImageCanvas while seeking, instead of unmounting and remounting it.
+  const imageMessageToRender = imageMessage || lastImageMessageRef.current;
 
-  const shouldSynchronize = config.synchronize && enabledMarkerTopics.length > 0;
-  const imageAndMarkerTopics = useShallowMemo([{ topic: cameraTopic, imageScale: scale }, ...enabledMarkerTopics]);
-  const { messagesByTopic, synchronizedMessages } = useOptionallySynchronizedMessages(
-    shouldSynchronize,
-    imageAndMarkerTopics
+  const { pauseFrame } = useMessagePipeline(
+    useCallback((messagePipeline) => ({ pauseFrame: messagePipeline.pauseFrame }), [])
   );
-  const imageMessage = messagesByTopic?.[cameraTopic]?.[0];
+  const onStartRenderImage = useCallback(() => {
+    const resumeFrame = pauseFrame("ImageView");
+    const onFinishRenderImage = () => {
+      resumeFrame();
+    };
+    return onFinishRenderImage;
+  }, [pauseFrame]);
 
-  const markersToRender: Message[] = useMemo(
-    () =>
-      shouldSynchronize
-        ? synchronizedMessages
-          ? enabledMarkerTopics.map((topic) => synchronizedMessages[topic])
-          : []
-        : filterMap(enabledMarkerTopics, (topic) => last(messagesByTopic[topic])),
-    [enabledMarkerTopics, messagesByTopic, shouldSynchronize, synchronizedMessages]
-  );
-  // Timestamps are displayed for informational purposes in the markers menu
-  const renderedMarkerTimestamps = useMemo(
-    () => {
-      const stamps = {};
-      for (const { topic, message } of markersToRender) {
-        // In some cases, a user may have subscribed to a topic that does not include a header stamp.
-        stamps[topic] = message?.header?.stamp ? formatTimeRaw(message.header.stamp) : "[ not available ]";
-      }
-      return stamps;
-    },
-    [markersToRender]
-  );
-
-  const pauseFrame = useMessagePipeline(useCallback((messagePipeline) => messagePipeline.pauseFrame, []));
-  const onStartRenderImage = useCallback(
-    () => {
-      const resumeFrame = pauseFrame("ImageView");
-      const onFinishRenderImage = () => {
-        resumeFrame();
-      };
-      return onFinishRenderImage;
-    },
-    [pauseFrame]
-  );
-
-  const rawMarkerData = {
-    markers: markersToRender,
-    scale,
-    transformMarkers,
-    cameraInfo: markersToRender.length > 0 ? cameraInfo : null,
-  };
-
-  const renderToolbar = () => {
+  const toolbar = useMemo(() => {
     return (
       <PanelToolbar floating helpContent={helpContent} menuContent={menuContent}>
         <div className={style.controls}>
-          {renderImageTopicDropdown()}
-          {renderMarkerDropdown(cameraInfo, renderedMarkerTimestamps)}
+          {imageTopicDropdown}
+          {markerDropdown}
         </div>
       </PanelToolbar>
     );
-  };
+  }, [imageTopicDropdown, markerDropdown, menuContent]);
 
-  if (!imageMessage || (shouldSynchronize && !synchronizedMessages)) {
+  const renderBottomBar = () => {
     return (
-      <Flex col clip>
-        {renderToolbar()}
-        {renderEmptyState(cameraTopic, enabledMarkerTopics, shouldSynchronize, messagesByTopic)}
-      </Flex>
-    );
-  }
-
-  return (
-    <Flex col clip>
-      {renderToolbar()}
-      <ImageCanvas
-        panelHooks={panelHooks}
-        topic={cameraTopicFullObject}
-        image={imageMessage}
-        rawMarkerData={rawMarkerData}
-        config={config}
-        saveConfig={saveConfig}
-        onStartRenderImage={onStartRenderImage}
-      />
       <ChildToggle.ContainsOpen>
         {(containsOpen) => {
           const canTransformMarkers = getGlobalHooks()
@@ -530,11 +550,39 @@ function ImageView(props: Props) {
           );
         }}
       </ChildToggle.ContainsOpen>
+    );
+  };
+
+  const showEmptyState = !imageMessage || (shouldSynchronize && !parsedFrame);
+
+  return (
+    <Flex col clip>
+      {toolbar}
+      {/* If rendered, EmptyState will hide the always-present ImageCanvas */}
+      {showEmptyState &&
+        renderEmptyState(cameraTopic, enabledMarkerTopics, shouldSynchronize, pendingSynchronizedMessages)}
+      {/* Always render the ImageCanvas because it's expensive to unmount and start up. */}
+      {imageMessageToRender && (
+        <ImageCanvas
+          topic={cameraTopicFullObject}
+          image={imageMessageToRender}
+          rawMarkerData={rawMarkerData}
+          iconMarkers={iconMarkersToRender}
+          config={config}
+          saveConfig={saveConfig}
+          onStartRenderImage={onStartRenderImage}
+        />
+      )}
+      {!showEmptyState && !isDemoMode && renderBottomBar()}
     </Flex>
   );
 }
 
 ImageView.panelType = "ImageViewPanel";
 ImageView.defaultConfig = getGlobalHooks().perPanelHooks().ImageView.defaultConfig;
-
+ImageView.shortcuts = [
+  { description: "Zoom in", keys: ["="] },
+  { description: "Zoom out", keys: ["-"] },
+  { description: "Zoom to percentage (10% - 100%)", keys: ["⌘", "1|2|...|9|0"] },
+];
 export default hot(Panel<Config>(ImageView));

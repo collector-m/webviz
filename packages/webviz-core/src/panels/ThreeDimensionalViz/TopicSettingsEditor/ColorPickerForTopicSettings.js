@@ -45,11 +45,11 @@ type Props = {|
   useModal?: boolean,
 |};
 type ColorPickerSettingsPanelProps = {|
-  color: ?string,
+  color: ?Color,
   onChange: (newColor: Color) => void,
 |};
 
-function getRGBAFromColor(color: { color: string, alpha: number }): Color {
+export function getRGBAFromColor(color: { color: string, alpha: number }): Color {
   const rgbaColor = tinyColor(color.color)
     .setAlpha(color.alpha / 100)
     .toRgb();

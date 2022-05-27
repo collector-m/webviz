@@ -10,7 +10,7 @@ import { mount } from "enzyme";
 import * as React from "react";
 
 import type { UseTreeInput } from "./types";
-import useTopicTree, { generateNodeKey, getBaseKey } from "./useTopicTree";
+import useTopicTree, { getBaseKey } from "./useTopicTree";
 import { TOPIC_DISPLAY_MODES } from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/TopicViewModeSelector";
 import type { Topic } from "webviz-core/src/players/types";
 
@@ -41,6 +41,7 @@ const sharedProps = {
   settingsByKey: {},
   topicTreeConfig: TREE_CONFIG,
   uncategorizedGroupName: "(Uncategorized)",
+  staticallyAvailableNamespacesByTopic: {},
 };
 
 function makeTopics(topicNames: string[]): Topic[] {
@@ -75,37 +76,6 @@ describe("useTopicTree", () => {
     });
   });
 
-  describe("generateNodeKey", () => {
-    it("throws an error when no topicName or name are provided", () => {
-      expect(() => generateNodeKey({})).toThrow();
-    });
-
-    it("prioritizes topicName over name", () => {
-      expect(generateNodeKey({ topicName: "/foo", name: "Foo" })).toEqual("t:/foo");
-    });
-
-    it("creates a namespace node", () => {
-      expect(generateNodeKey({ topicName: "/foo", namespace: "a" })).toEqual("ns:/foo:a");
-    });
-
-    it("creates a name node", () => {
-      expect(generateNodeKey({ name: "Foo" })).toEqual("name:Foo");
-    });
-    it("generates key for bag2 group", () => {
-      expect(generateNodeKey({ name: "Foo", isFeatureColumn: true })).toEqual("name_2:Foo");
-    });
-    it("generates key for bag2 topic", () => {
-      expect(generateNodeKey({ topicName: "/foo", name: "Foo", isFeatureColumn: true })).toEqual(
-        "t:/webviz_source_2/foo"
-      );
-    });
-    it("generates key for bag2 namespace", () => {
-      expect(generateNodeKey({ topicName: "/foo", namespace: "ns1", isFeatureColumn: true })).toEqual(
-        "ns:/webviz_source_2/foo:ns1"
-      );
-    });
-  });
-
   describe("rootTreeNode", () => {
     it("simple tree", () => {
       const Test = createTest();
@@ -116,6 +86,36 @@ describe("useTopicTree", () => {
         children: [
           {
             availableByColumn: [false],
+            featureKey: "t:/webviz_source_2/foo",
+            key: "t:/foo",
+            providerAvailable: false,
+            topicName: "/foo",
+            type: "topic",
+          },
+        ],
+        featureKey: "name_2:root",
+        key: "name:root",
+        name: "root",
+        providerAvailable: false,
+        type: "group",
+      });
+    });
+
+    it("simple tree with statically available topic / namespace", () => {
+      const Test = createTest();
+      mount(
+        <Test
+          {...sharedProps}
+          staticallyAvailableNamespacesByTopic={{ "/foo": ["ns1", "ns2"] }}
+          topicTreeConfig={{ name: "root", children: [{ topicName: "/foo" }] }}
+        />
+      );
+
+      expect(Test.result.mock.calls[0][0].rootTreeNode).toEqual({
+        availableByColumn: [true],
+        children: [
+          {
+            availableByColumn: [true],
             featureKey: "t:/webviz_source_2/foo",
             key: "t:/foo",
             providerAvailable: false,
@@ -567,7 +567,7 @@ describe("useTopicTree", () => {
       const result0 = Test.result.mock.calls[0][0];
       const topicNode0 = result0.nodesByKey[topicNodeKey];
       expect(result0.getIsTreeNodeVisibleInScene(topicNode0, 0)).toEqual(false);
-      expect(result0.getIsTreeNodeVisibleInScene(topicNode0, 0, namespaceNodeKey)).toEqual(false);
+      expect(result0.getIsTreeNodeVisibleInScene(topicNode0, 0, "ns1")).toEqual(false);
 
       root.setProps({ providerTopics: makeTopics(["/foo", "/webviz_source_2/foo"]) });
       const result1 = Test.result.mock.calls[1][0];
@@ -581,7 +581,8 @@ describe("useTopicTree", () => {
       const topicNode2 = result1.nodesByKey[topicNodeKey];
       expect(result2.getIsTreeNodeVisibleInScene(topicNode2, 0, "ns1")).toEqual(true);
     });
-    it("returns namespace nodes as visibile by default (when the nodes are not checked)", () => {
+
+    it("returns namespace nodes as visible by default (when the nodes are not checked)", () => {
       const topicNodeKey = "t:/foo";
       const Test = createTest();
       mount(
@@ -598,7 +599,7 @@ describe("useTopicTree", () => {
       expect(result.getIsTreeNodeVisibleInScene(topicNode, 0, "ns1")).toEqual(true);
     });
 
-    it("does not return namespace nodes as visibile by default if namespaces are modified", () => {
+    it("does not return namespace nodes as visible by default if namespaces are modified", () => {
       const topicNodeKey = "t:/foo";
       const Test = createTest();
       mount(
@@ -664,6 +665,33 @@ describe("useTopicTree", () => {
       const topicNode3 = result3.nodesByKey[topicNodeKey];
       expect(result3.getIsTreeNodeVisibleInScene(topicNode3, 1)).toEqual(true);
       expect(result3.getIsTreeNodeVisibleInScene(topicNode3, 1, "ns1")).toEqual(false);
+    });
+
+    it("returns the namespace node as not visible when topic becomes unavailable", () => {
+      const topicNodeKey = "t:/foo";
+      const namespaceNodeKey = "ns:/foo:ns1";
+
+      const Test = createTest();
+      const root = mount(
+        <Test
+          {...sharedProps}
+          providerTopics={makeTopics(["/foo"])}
+          checkedKeys={["name:Group1", namespaceNodeKey, topicNodeKey]}
+        />
+      );
+
+      // Topic and namespace are both visible.
+      const result0 = Test.result.mock.calls[0][0];
+      const topicNode0 = result0.nodesByKey[topicNodeKey];
+      expect(result0.getIsTreeNodeVisibleInScene(topicNode0, 0)).toEqual(true);
+      expect(result0.getIsTreeNodeVisibleInScene(topicNode0, 0, "ns1")).toEqual(true);
+
+      // When the topic becomes unavailable, both topic and namespace nodes become invisible.
+      root.setProps({ providerTopics: makeTopics([]) });
+      const result1 = Test.result.mock.calls[1][0];
+      const topicNode1 = result1.nodesByKey[topicNodeKey];
+      expect(result1.getIsTreeNodeVisibleInScene(topicNode1, 0)).toEqual(false);
+      expect(result1.getIsTreeNodeVisibleInScene(topicNode1, 0, "ns1")).toEqual(false);
     });
   });
 

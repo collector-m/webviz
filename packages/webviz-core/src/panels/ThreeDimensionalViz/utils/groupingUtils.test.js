@@ -11,6 +11,8 @@ import type { Color, Point, LineStripMarker, LineListMarker } from "webviz-core/
 import { COLORS, MARKER_MSG_TYPES } from "webviz-core/src/util/globalConstants";
 import { emptyPose } from "webviz-core/src/util/Pose";
 
+const DUMMY_POINT_COLOR = { r: 0, g: 0, b: 0, a: 0 };
+
 function lineStrip({
   points,
   closed,
@@ -146,6 +148,63 @@ describe("groupLineStripsIntoInstancedLineLists", () => {
     ]);
   });
 
+  it("handles markers with mixed open and closed loops", () => {
+    const markers = [
+      lineStrip({
+        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+        closed: false,
+        color: COLORS.RED,
+      }),
+      lineStrip({
+        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+        closed: true,
+        color: COLORS.RED,
+      }),
+    ];
+    expect(groupLinesIntoInstancedLineLists(markers)).toEqual([
+      expect.objectContaining({
+        colors: [
+          COLORS.RED,
+          COLORS.RED,
+          DUMMY_POINT_COLOR,
+          DUMMY_POINT_COLOR,
+          DUMMY_POINT_COLOR,
+          COLORS.RED,
+          COLORS.RED,
+          COLORS.RED,
+        ],
+        metadataByIndex: [
+          expect.objectContaining({ points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }),
+          expect.objectContaining({ points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }),
+          {},
+          {},
+          {},
+          expect.objectContaining({ points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }),
+          expect.objectContaining({ points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }),
+        ],
+        points: [
+          { x: 0, y: 0, z: 0 },
+          { x: 1, y: 0, z: 0 },
+          { x: 1, y: 0, z: 0 }, // self point for transition
+          { x: NaN, y: NaN, z: NaN }, // NaN point for transition
+          { x: 0, y: 0, z: 0 }, // self point for transition
+          { x: 0, y: 0, z: 0 },
+          { x: 1, y: 0, z: 0 },
+          { x: 0, y: 0, z: 0 }, // close point
+        ],
+        poses: [
+          { orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } },
+          { orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } },
+        ],
+      }),
+    ]);
+  });
+
   it("handles markers without specified colors", () => {
     const markers = [
       lineStrip({
@@ -192,28 +251,39 @@ describe("groupLineStripsIntoInstancedLineLists", () => {
     ];
     expect(groupLinesIntoInstancedLineLists(markers)).toEqual([
       {
+        header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
         action: 0,
+        ns: "bar",
+        scale: { x: 1, y: 1, z: 1 },
+        pose: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
         colors: [COLORS.RED, COLORS.RED],
-        header: { frame_id: "quux", stamp: { nsec: 2, sec: 1 } },
-        id: "ns:bar_type:5_scalex:1_scaley:1_scalez:1",
+        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+        poses: [{ position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } }],
         metadataByIndex: [
           {
-            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
-            action: 0,
             id: "foo",
             ns: "bar",
-            type: MARKER_MSG_TYPES.LINE_LIST,
-            scale: { x: 1.0, y: 1.0, z: 1.0 },
+            scale: { x: 1, y: 1, z: 1 },
             points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-            color: COLORS.RED,
+            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
+            action: 0,
             pose: { position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } },
+            color: COLORS.RED,
+            type: MARKER_MSG_TYPES.LINE_LIST,
+          },
+          {
+            id: "foo",
+            ns: "bar",
+            scale: { x: 1, y: 1, z: 1 },
+            points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
+            action: 0,
+            pose: { position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } },
+            color: COLORS.RED,
+            type: MARKER_MSG_TYPES.LINE_LIST,
           },
         ],
-        ns: "bar",
-        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-        pose: { orientation: { w: 1, x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 } },
-        poses: [{ orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } }],
-        scale: { x: 1, y: 1, z: 1 },
+        id: "ns:bar_type:5_scalex:1_scaley:1_scalez:1",
         type: MARKER_MSG_TYPES.INSTANCED_LINE_LIST,
         primitive: "lines",
       },
@@ -234,55 +304,66 @@ describe("groupLineStripsIntoInstancedLineLists", () => {
     ];
     expect(groupLinesIntoInstancedLineLists(markers)).toEqual([
       {
+        header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
         action: 0,
+        ns: "bar",
+        scale: { x: 1, y: 1, z: 1 },
+        pose: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
         colors: [COLORS.RED, COLORS.RED],
-        header: { frame_id: "quux", stamp: { nsec: 2, sec: 1 } },
-        id: "ns:bar_type:4_scalex:1_scaley:1_scalez:1",
+        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+        poses: [{ position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } }],
         metadataByIndex: [
           {
-            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
-            action: 0,
             id: "foo",
             ns: "bar",
-            type: MARKER_MSG_TYPES.LINE_STRIP,
-            scale: { x: 1.0, y: 1.0, z: 1.0 },
+            scale: { x: 1, y: 1, z: 1 },
             points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
             closed: false,
-            color: COLORS.RED,
+            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
+            action: 0,
             pose: { position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } },
+            color: COLORS.RED,
+            type: MARKER_MSG_TYPES.LINE_STRIP,
           },
         ],
-        ns: "bar",
-        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-        pose: emptyPose(),
-        poses: [{ orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } }],
-        scale: { x: 1, y: 1, z: 1 },
+        id: "ns:bar_type:4_scalex:1_scaley:1_scalez:1",
         type: MARKER_MSG_TYPES.LINE_STRIP,
         primitive: "line strip",
       },
       {
+        header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
         action: 0,
+        ns: "bar",
+        scale: { x: 1, y: 1, z: 1 },
+        pose: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } },
         colors: [COLORS.RED, COLORS.RED],
-        header: { frame_id: "quux", stamp: { nsec: 2, sec: 1 } },
-        id: "ns:bar_type:5_scalex:1_scaley:1_scalez:1",
+        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+        poses: [{ position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } }],
         metadataByIndex: [
           {
-            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
-            action: 0,
             id: "foo",
             ns: "bar",
-            type: MARKER_MSG_TYPES.LINE_LIST,
-            scale: { x: 1.0, y: 1.0, z: 1.0 },
+            scale: { x: 1, y: 1, z: 1 },
             points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-            color: COLORS.RED,
+            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
+            action: 0,
             pose: { position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } },
+            color: COLORS.RED,
+            type: MARKER_MSG_TYPES.LINE_LIST,
+          },
+          {
+            id: "foo",
+            ns: "bar",
+            scale: { x: 1, y: 1, z: 1 },
+            points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
+            header: { frame_id: "quux", stamp: { sec: 1, nsec: 2 } },
+            action: 0,
+            pose: { position: { x: 0, y: 0, z: 0 }, orientation: { w: 1, x: 1, y: 1, z: 1 } },
+            color: COLORS.RED,
+            type: MARKER_MSG_TYPES.LINE_LIST,
           },
         ],
-        ns: "bar",
-        points: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }],
-        pose: { orientation: { w: 1, x: 0, y: 0, z: 0 }, position: { x: 0, y: 0, z: 0 } },
-        poses: [{ orientation: { w: 1, x: 1, y: 1, z: 1 }, position: { x: 0, y: 0, z: 0 } }],
-        scale: { x: 1, y: 1, z: 1 },
+        id: "ns:bar_type:5_scalex:1_scaley:1_scalez:1",
         type: MARKER_MSG_TYPES.INSTANCED_LINE_LIST,
         primitive: "lines",
       },

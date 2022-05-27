@@ -8,10 +8,11 @@
 
 import { storiesOf } from "@storybook/react";
 import * as React from "react";
-import { type Time, MessageWriter, parseMessageDefinition } from "rosbag";
+import { parseMessageDefinition } from "rosbag";
 
 import Plot from "webviz-core/src/panels/Plot";
 import PanelSetup, { triggerWheel } from "webviz-core/src/stories/PanelSetup";
+import { wrapJsObject } from "webviz-core/src/util/binaryObjects";
 import { fromSec } from "webviz-core/src/util/time";
 
 const float64StampedDefinition = `std_msgs/Header header
@@ -23,12 +24,14 @@ uint32 seq
 time stamp
 string frame_id`;
 
-const writer = new MessageWriter(parseMessageDefinition(float64StampedDefinition));
+const float64ArrayStampedDefinition = `std_msgs/Header header
+float64[] data
 
-const serializeFloat64Stamped = ({ value, headerStamp: { sec, nsec } }: { value: number, headerStamp: Time }) => {
-  const buffer = writer.writeMessage({ header: { seq: 0, stamp: { sec, nsec }, frame_id: "" }, data: value });
-  return Buffer.from(buffer);
-};
+================================================================================
+MSG: std_msgs/Header
+uint32 seq
+time stamp
+string frame_id`;
 
 const locationMessages = [
   { header: { stamp: { sec: 0, nsec: 574635076 } }, pose: { acceleration: -0.00116662939, velocity: 1.184182664 } },
@@ -66,10 +69,80 @@ const otherStateMessages = [
   { header: { stamp: { sec: 2, nsec: 578787057 } }, items: [{ id: 10, speed: 1.63 }, { id: 42, speed: 0.06 }] },
 ];
 
+const withEndTime = (testFixture, endTime) => ({
+  ...testFixture,
+  activeData: { ...testFixture.activeData, endTime },
+});
+
+const datatypes = {
+  "msgs/PoseDebug": {
+    fields: [
+      { name: "header", type: "std_msgs/Header", isArray: false, isComplex: true },
+      { name: "pose", type: "msgs/Pose", isArray: false, isComplex: true },
+    ],
+  },
+  "msgs/Pose": {
+    fields: [
+      { name: "header", type: "std_msgs/Header", isArray: false, isComplex: true },
+      { name: "x", type: "float64", isArray: false },
+      { name: "y", type: "float64", isArray: false },
+      { name: "travel", type: "float64", isArray: false },
+      { name: "velocity", type: "float64", isArray: false },
+      { name: "acceleration", type: "float64", isArray: false },
+      { name: "heading", type: "float64", isArray: false },
+    ],
+  },
+  "msgs/State": {
+    fields: [
+      { name: "header", type: "std_msgs/Header", isArray: false, isComplex: true },
+      { name: "items", type: "msgs/OtherState", isArray: true, isComplex: true },
+    ],
+  },
+  "msgs/OtherState": {
+    fields: [{ name: "id", type: "int32", isArray: false }, { name: "speed", type: "float32", isArray: false }],
+  },
+  "std_msgs/Header": {
+    fields: [
+      { name: "seq", type: "uint32", isArray: false },
+      {
+        name: "stamp",
+        type: "time",
+        isArray: false,
+      },
+      { name: "frame_id", type: "string", isArray: false },
+    ],
+  },
+  "std_msgs/Bool": { fields: [{ name: "data", type: "bool", isArray: false }] },
+  "nonstd_msgs/Float64Array": {
+    fields: [
+      { name: "header", type: "std_msgs/Header", isArray: false, isComplex: true },
+      { name: "data", type: "float64", isArray: true },
+    ],
+  },
+  "nonstd_msgs/Float64Stamped": {
+    fields: [
+      { name: "header", type: "std_msgs/Header", isArray: false, isComplex: true },
+      { name: "data", type: "float64", isArray: false },
+    ],
+  },
+};
+
 const getPreloadedMessage = (seconds) => ({
   topic: "/preloaded_topic",
   receiveTime: fromSec(seconds),
-  message: serializeFloat64Stamped({ value: Math.pow(seconds, 2), headerStamp: fromSec(seconds - 0.5) }),
+  message: wrapJsObject(datatypes, "nonstd_msgs/Float64Stamped", {
+    data: Math.pow(seconds, 2),
+    header: { stamp: fromSec(seconds - 0.5), frame_id: "", seq: 0 },
+  }),
+});
+
+const getArrayMessage = (seconds) => ({
+  topic: "/array_topic",
+  receiveTime: fromSec(seconds),
+  message: wrapJsObject(datatypes, "nonstd_msgs/Float64Array", {
+    data: new Array(Math.round(seconds * 10)).fill(0),
+    header: { stamp: fromSec(seconds - 0.5), frame_id: "", seq: 0 },
+  }),
 });
 
 const messageCache = {
@@ -78,6 +151,7 @@ const messageCache = {
       sizeInBytes: 0,
       messagesByTopic: {
         "/preloaded_topic": [getPreloadedMessage(seconds)],
+        "/array_topic": [getArrayMessage(seconds)],
       },
     })),
     undefined, // 1.1
@@ -88,77 +162,32 @@ const messageCache = {
       sizeInBytes: 0,
       messagesByTopic: {
         "/preloaded_topic": [getPreloadedMessage(seconds)],
+        "/array_topic": [getArrayMessage(seconds)],
       },
     })),
   ],
   startTime: fromSec(0.6),
 };
 
-const withEndTime = (testFixture, endTime) => ({
-  ...testFixture,
-  activeData: { ...testFixture.activeData, endTime },
-});
-
-const fixture = {
-  datatypes: {
-    "msgs/PoseDebug": {
-      fields: [
-        { name: "header", type: "std_msgs/Header", isArray: false },
-        { name: "pose", type: "msgs/Pose", isArray: false },
-      ],
-    },
-    "msgs/Pose": {
-      fields: [
-        { name: "header", type: "std_msgs/Header", isArray: false },
-        { name: "x", type: "float64", isArray: false },
-        { name: "y", type: "float64", isArray: false },
-        { name: "travel", type: "float64", isArray: false },
-        { name: "velocity", type: "float64", isArray: false },
-        { name: "acceleration", type: "float64", isArray: false },
-        { name: "heading", type: "float64", isArray: false },
-      ],
-    },
-    "msgs/State": {
-      fields: [
-        { name: "header", type: "std_msgs/Header", isArray: false },
-        { name: "items", type: "msgs/OtherState", isArray: true },
-      ],
-    },
-    "msgs/OtherState": {
-      fields: [{ name: "id", type: "int32", isArray: false }, { name: "speed", type: "float32", isArray: false }],
-    },
-    "std_msgs/Header": {
-      fields: [
-        { name: "seq", type: "uint32", isArray: false },
-        {
-          name: "stamp",
-          type: "time",
-          isArray: false,
-        },
-        { name: "frame_id", type: "string", isArray: false },
-      ],
-    },
-    "std_msgs/Bool": { fields: [{ name: "data", type: "bool", isArray: false }] },
-    "nonstd_msgs/Float64Stamped": {
-      fields: [
-        { name: "header", type: "std_msgs/Header", isArray: false },
-        { name: "data", type: "float64", isArray: false },
-      ],
-    },
-  },
+export const fixture = {
+  datatypes,
   topics: [
     { name: "/some_topic/location", datatype: "msgs/PoseDebug" },
     { name: "/some_topic/location_subset", datatype: "msgs/PoseDebug" },
     { name: "/some_topic/state", datatype: "msgs/State" },
     { name: "/boolean_topic", datatype: "std_msgs/Bool" },
     { name: "/preloaded_topic", datatype: "nonstd_msgs/Float64Stamped" },
+    { name: "/array_topic", datatype: "nonstd_msgs/Float64Array" },
   ],
   activeData: {
     startTime: { sec: 0, nsec: 202050 },
     endTime: { sec: 24, nsec: 999997069 },
     currentTime: { sec: 0, nsec: 750000000 },
     isPlaying: false,
-    messageDefinitionsByTopic: { "/preloaded_topic": float64StampedDefinition },
+    parsedMessageDefinitionsByTopic: {
+      "/preloaded_topic": parseMessageDefinition(float64StampedDefinition),
+      "/array_topic": parseMessageDefinition(float64ArrayStampedDefinition),
+    },
     speed: 0.2,
   },
   frame: {
@@ -199,11 +228,11 @@ const paths = [
   { value: "/some_topic/location.header.stamp", enabled: true, timestampMethod: "receiveTime" },
 ];
 
-const exampleConfig = { paths, minYValue: "", maxYValue: "", showLegend: true, xAxisVal: "timestamp" };
+export const exampleConfig = { paths, minYValue: "", maxYValue: "", showLegend: true, xAxisVal: "timestamp" };
 storiesOf("<Plot>", module)
   .addParameters({
     screenshot: {
-      delay: 1000,
+      delay: 4000,
     },
   })
   .add("line graph", () => {
@@ -548,7 +577,6 @@ storiesOf("<Plot>", module)
     );
   })
   .add("preloaded data in binary blocks", () => {
-    localStorage.setItem("experimentalFeaturesSettings", JSON.stringify({ preloading: "alwaysOn" }));
     return (
       <PanelSetup fixture={withEndTime(fixture, { sec: 2, nsec: 0 })}>
         <Plot
@@ -564,7 +592,6 @@ storiesOf("<Plot>", module)
     );
   })
   .add("mixed streamed and preloaded data", () => {
-    localStorage.setItem("experimentalFeaturesSettings", JSON.stringify({ preloading: "alwaysOn" }));
     return (
       <PanelSetup fixture={withEndTime(fixture, { sec: 3, nsec: 0 })}>
         <Plot
@@ -580,7 +607,6 @@ storiesOf("<Plot>", module)
     );
   })
   .add("preloaded data and its derivative", () => {
-    localStorage.setItem("experimentalFeaturesSettings", JSON.stringify({ preloading: "alwaysOn" }));
     return (
       <PanelSetup fixture={withEndTime(fixture, { sec: 2, nsec: 0 })}>
         <Plot
@@ -590,6 +616,48 @@ storiesOf("<Plot>", module)
               { value: "/preloaded_topic.data", enabled: true, timestampMethod: "receiveTime" },
               { value: "/preloaded_topic.data.@derivative", enabled: true, timestampMethod: "receiveTime" },
             ],
+          }}
+        />
+      </PanelSetup>
+    );
+  })
+  .add("preloaded data and its negative", () => {
+    return (
+      <PanelSetup fixture={withEndTime(fixture, { sec: 2, nsec: 0 })}>
+        <Plot
+          config={{
+            ...exampleConfig,
+            paths: [
+              { value: "/preloaded_topic.data", enabled: true, timestampMethod: "receiveTime" },
+              { value: "/preloaded_topic.data.@negative", enabled: true, timestampMethod: "receiveTime" },
+            ],
+          }}
+        />
+      </PanelSetup>
+    );
+  })
+  .add("preloaded data and its absolute value", () => {
+    return (
+      <PanelSetup fixture={withEndTime(fixture, { sec: 2, nsec: 0 })}>
+        <Plot
+          config={{
+            ...exampleConfig,
+            paths: [
+              { value: "/preloaded_topic.data", enabled: true, timestampMethod: "receiveTime" },
+              { value: "/preloaded_topic.data.@abs", enabled: true, timestampMethod: "receiveTime" },
+            ],
+          }}
+        />
+      </PanelSetup>
+    );
+  })
+  .add("array data with the .@length modifier", () => {
+    return (
+      <PanelSetup fixture={withEndTime(fixture, { sec: 2, nsec: 0 })}>
+        <Plot
+          config={{
+            ...exampleConfig,
+            paths: [{ value: "/array_topic.data.@length", enabled: true, timestampMethod: "receiveTime" }],
           }}
         />
       </PanelSetup>

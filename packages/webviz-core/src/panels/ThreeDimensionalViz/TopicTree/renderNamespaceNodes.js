@@ -22,7 +22,7 @@ import type {
 import VisibilityToggle, { TOGGLE_WRAPPER_SIZE } from "./VisibilityToggle";
 import { ThreeDimensionalVizContext } from "webviz-core/src/panels/ThreeDimensionalViz/ThreeDimensionalVizContext";
 import { TopicTreeContext } from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/useTopicTree";
-import { SECOND_SOURCE_PREFIX, TRANSFORM_TOPIC } from "webviz-core/src/util/globalConstants";
+import { $WEBVIZ_SOURCE_2, $TF } from "webviz-core/src/util/globalConstants";
 import { useGuaranteedContext } from "webviz-core/src/util/hooks";
 import { joinTopics } from "webviz-core/src/util/topicUtils";
 
@@ -50,6 +50,7 @@ type Props = {|
   setEditingNamespace: SetEditingNamespace,
   topicNode: TreeTopicNode,
   width: number,
+  diffModeEnabled: boolean,
 |};
 
 function NamespaceNodeRow({
@@ -71,6 +72,7 @@ function NamespaceNodeRow({
   topicName,
   onNamespaceOverrideColorChange,
   setEditingNamespace,
+  diffModeEnabled,
 }: {
   nodeKey: string,
   featureKey: string,
@@ -89,30 +91,40 @@ function NamespaceNodeRow({
   unavailableTooltip: string,
   hasFeatureColumn: boolean,
   topicName: string,
+  diffModeEnabled: boolean,
   onNamespaceOverrideColorChange: OnNamespaceOverrideColorChange,
 }) {
   const nodeVisibleInScene = !!(visibleInSceneByColumn[0] || visibleInSceneByColumn[1]);
 
   const { setHoveredMarkerMatchers } = useContext(ThreeDimensionalVizContext);
-  const onMouseLeave = useCallback(() => setHoveredMarkerMatchers([]), [setHoveredMarkerMatchers]);
-  const mouseEventHandlersByColumnIdx = useMemo(
-    () => {
-      const topicNameByColumnIdx = [topicName, joinTopics(SECOND_SOURCE_PREFIX, topicName)];
-      return topicNameByColumnIdx.map((topic, columnIndex) => ({
-        onMouseEnter: () => {
-          if (visibleInSceneByColumn[columnIndex]) {
-            setHoveredMarkerMatchers([{ topic, checks: [{ markerKeyPath: ["ns"], value: namespace }] }]);
-          }
-        },
-        onMouseLeave,
-      }));
-    },
-    [namespace, onMouseLeave, setHoveredMarkerMatchers, topicName, visibleInSceneByColumn]
-  );
   const { toggleCheckAllAncestors, toggleNamespaceChecked } = useGuaranteedContext(
     TopicTreeContext,
     "TopicTreeContext"
   );
+
+  const updateHoveredMarkerMatchers = useCallback((columnIndex, visible) => {
+    if (visible) {
+      const topic = [topicName, joinTopics($WEBVIZ_SOURCE_2, topicName)][columnIndex];
+      setHoveredMarkerMatchers([{ topic, checks: [{ markerKeyPath: ["ns"], value: namespace }] }]);
+    }
+  }, [namespace, setHoveredMarkerMatchers, topicName]);
+
+  const onMouseLeave = useCallback(() => setHoveredMarkerMatchers([]), [setHoveredMarkerMatchers]);
+  const mouseEventHandlersByColumnIdx = useMemo(() => {
+    return new Array(2).fill().map((topic, columnIndex) => ({
+      onMouseEnter: () => updateHoveredMarkerMatchers(columnIndex, true),
+      onMouseLeave,
+    }));
+  }, [updateHoveredMarkerMatchers, onMouseLeave]);
+
+  const onToggle = useCallback((columnIndex) => {
+    toggleNamespaceChecked({ topicName, namespace, columnIndex });
+    updateHoveredMarkerMatchers(columnIndex, !visibleInSceneByColumn[columnIndex]);
+  }, [toggleNamespaceChecked, topicName, namespace, updateHoveredMarkerMatchers, visibleInSceneByColumn]);
+  const onAltToggle = useCallback((columnIndex) => {
+    toggleCheckAllAncestors(nodeKey, columnIndex, topicName);
+    updateHoveredMarkerMatchers(columnIndex, !visibleInSceneByColumn[columnIndex]);
+  }, [toggleCheckAllAncestors, nodeKey, topicName, updateHoveredMarkerMatchers, visibleInSceneByColumn]);
 
   return (
     <STreeNodeRow
@@ -145,25 +157,27 @@ function NamespaceNodeRow({
         />
       </SLeft>
       <SRightActions>
-        {topicNodeAvailable && (
-          <SToggles>
-            {availableByColumn.map((available, columnIndex) => (
-              <VisibilityToggle
-                available={available}
-                checked={checkedByColumn[columnIndex]}
-                dataTest={`visibility-toggle~${nodeKey}~column${columnIndex}`}
-                key={columnIndex}
-                onAltToggle={() => toggleCheckAllAncestors(nodeKey, columnIndex, topicName)}
-                onToggle={() => toggleNamespaceChecked({ topicName, namespace, columnIndex })}
-                overrideColor={overrideColorByColumn && overrideColorByColumn[columnIndex]}
-                size="SMALL"
-                unavailableTooltip={unavailableTooltip}
-                visibleInScene={!!visibleInSceneByColumn[columnIndex]}
-                {...mouseEventHandlersByColumnIdx[columnIndex]}
-              />
-            ))}
-          </SToggles>
-        )}
+        <SToggles>
+          {availableByColumn.map((available, columnIndex) => (
+            <VisibilityToggle
+              // Some namespaces are statically available. But we want to make sure the parent topic is also available
+              // before showing it as available.
+              available={topicNodeAvailable && available}
+              checked={checkedByColumn[columnIndex]}
+              dataTest={`visibility-toggle~${nodeKey}~column${columnIndex}`}
+              key={columnIndex}
+              onAltToggle={() => onAltToggle(columnIndex)}
+              onToggle={() => onToggle(columnIndex)}
+              overrideColor={overrideColorByColumn && overrideColorByColumn[columnIndex]}
+              size="SMALL"
+              unavailableTooltip={unavailableTooltip}
+              visibleInScene={!!visibleInSceneByColumn[columnIndex]}
+              {...mouseEventHandlersByColumnIdx[columnIndex]}
+              diffModeEnabled={diffModeEnabled}
+              columnIndex={columnIndex}
+            />
+          ))}
+        </SToggles>
         <NamespaceMenu
           disableBaseColumn={!availableByColumn[0]}
           disableFeatureColumn={!availableByColumn[1]}
@@ -194,6 +208,7 @@ export default function renderNamespaceNodes({
   setEditingNamespace,
   topicNode,
   width,
+  diffModeEnabled,
 }: Props): TreeUINode[] {
   const rowWidth = width - (isXSWidth ? 0 : TREE_SPACING * 2) - OUTER_LEFT_MARGIN;
   const topicNodeAvailable = topicNode.availableByColumn[0] || topicNode.availableByColumn[1];
@@ -203,7 +218,7 @@ export default function renderNamespaceNodes({
 
   // TODO(Audrey): remove the special tooltip once we add 2nd bag support for map and tf namespaces.
   const unavailableTooltip =
-    topicNode.topicName === TRANSFORM_TOPIC || topicNode.topicName === "/metadata" ? "Unsupported" : "Unavailable";
+    topicNode.topicName === $TF || topicNode.topicName === "/metadata" ? "Unsupported" : "Unavailable";
 
   const commonRowProps = {
     rowWidth,
@@ -216,6 +231,7 @@ export default function renderNamespaceNodes({
     unavailableTooltip,
     hasFeatureColumn,
     topicName: topicNode.topicName,
+    diffModeEnabled,
   };
 
   return children

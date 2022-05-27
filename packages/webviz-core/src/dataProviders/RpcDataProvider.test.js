@@ -13,15 +13,18 @@ import { mockExtensionPoint } from "webviz-core/src/dataProviders/mockExtensionP
 import Rpc, { createLinkedChannels } from "webviz-core/src/util/Rpc";
 
 const data = {
-  messages: [
-    { topic: "/some_topic", receiveTime: { sec: 100, nsec: 0 }, message: new ArrayBuffer(0) },
-    { topic: "/some_topic", receiveTime: { sec: 101, nsec: 0 }, message: new ArrayBuffer(0) },
-    { topic: "/some_topic", receiveTime: { sec: 102, nsec: 0 }, message: new ArrayBuffer(0) },
-  ],
+  messages: {
+    rosBinaryMessages: [
+      { topic: "/some_topic", receiveTime: { sec: 100, nsec: 0 }, message: new ArrayBuffer(0) },
+      { topic: "/some_topic", receiveTime: { sec: 101, nsec: 0 }, message: new ArrayBuffer(0) },
+      { topic: "/some_topic", receiveTime: { sec: 102, nsec: 0 }, message: new ArrayBuffer(0) },
+    ],
+    parsedMessages: undefined,
+    bobjects: undefined,
+  },
   topics: [{ name: "/some_topic", datatype: "some_datatype" }],
-  datatypes: { some_datatype: { fields: [{ name: "data", type: "string" }] } },
+  messageDefinitionsByTopic: { some_datatype: "dummy" },
   providesParsedMessages: false,
-  messageDefinitionsByTopic: {},
 };
 const dummyChildren = [{ name: "MemoryDataProvider", args: {}, children: [] }];
 
@@ -36,8 +39,10 @@ describe("RpcDataProvider", () => {
       start: { nsec: 0, sec: 100 },
       end: { nsec: 0, sec: 102 },
       topics: [{ datatype: "some_datatype", name: "/some_topic" }],
-      datatypes: { some_datatype: { fields: [{ name: "data", type: "string" }] } },
-      messageDefinitionsByTopic: {},
+      messageDefinitions: {
+        type: "raw",
+        messageDefinitionsByTopic: { some_datatype: "dummy" },
+      },
       providesParsedMessages: false,
     });
   });
@@ -49,14 +54,24 @@ describe("RpcDataProvider", () => {
     new RpcDataProviderRemote(new Rpc(workerChannel), () => memoryDataProvider);
 
     await provider.initialize(mockExtensionPoint().extensionPoint);
-    const messages = await provider.getMessages({ sec: 100, nsec: 0 }, { sec: 101, nsec: 0 }, ["/some_topic"]);
-    expect(messages).toEqual([data.messages[0], data.messages[1]]);
+    const messages = await provider.getMessages(
+      { sec: 100, nsec: 0 },
+      { sec: 101, nsec: 0 },
+      { rosBinaryMessages: ["/some_topic"] }
+    );
+    expect(messages.bobjects).toBe(undefined);
+    expect(messages.parsedMessages).toBe(undefined);
+    expect(messages.rosBinaryMessages).toEqual([
+      data.messages.rosBinaryMessages[0],
+      data.messages.rosBinaryMessages[1],
+    ]);
   });
 
   it("passes calls to extensionPoint.reportMetadataCallback through the Rpc channel", async () => {
     const extensionPoint = {
       progressCallback() {},
       reportMetadataCallback: jest.fn(),
+      notifyPlayerManager: jest.fn(),
     };
     const { local: mainChannel, remote: workerChannel } = createLinkedChannels();
     const provider = new RpcDataProvider(new Rpc(mainChannel), dummyChildren);

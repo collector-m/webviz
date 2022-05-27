@@ -10,13 +10,44 @@ import * as Sentry from "@sentry/browser";
 import React from "react";
 import ReactDOM from "react-dom";
 
+const getEnableWhyDidYouRender = () => {
+  try {
+    return JSON.parse(process.env.ENABLE_WHY_DID_YOU_RENDER || "false");
+  } catch {
+    return false;
+  }
+};
+
+if (process.env.NODE_ENV === "development" && getEnableWhyDidYouRender()) {
+  const whyDidYouRender = require("@welldone-software/why-did-you-render");
+  whyDidYouRender(React, {
+    trackAllPureComponents: true,
+  });
+}
+
 // We put all the internal requires inside functions, so that when they load the hooks have been properly set.
 
 let importedPanelsByCategory;
 let importedPerPanelHooks;
 const defaultHooks = {
   areHooksImported: () => importedPanelsByCategory && importedPerPanelHooks,
-  getEventLogger: () => undefined,
+  getLayoutFromUrl: async (search) => {
+    const { LAYOUT_URL_QUERY_KEY } = require("webviz-core/src/util/globalConstants");
+    const params = new URLSearchParams(search);
+    const layoutUrl = params.get(LAYOUT_URL_QUERY_KEY);
+    return fetch(layoutUrl)
+      .then((result) => {
+        try {
+          return result.json();
+        } catch (e) {
+          throw new Error(`Failed to parse JSON layout: ${e.message}`);
+        }
+      })
+      .catch((e) => {
+        throw new Error(`Failed to fetch layout from URL: ${e.message}`);
+      });
+  },
+  getDemoModeComponent: () => undefined,
   async importHooksAsync() {
     return new Promise((resolve, reject) => {
       if (importedPanelsByCategory && importedPerPanelHooks) {
@@ -34,32 +65,35 @@ const defaultHooks = {
         });
     });
   },
-  nodes: () => [],
-  getDefaultGlobalStates() {
+  getDefaultPersistedState() {
     const { defaultPlaybackConfig } = require("webviz-core/src/reducers/panels");
     /* eslint-disable no-restricted-modules */
     const { CURRENT_LAYOUT_VERSION } = require("webviz-core/migrations/constants");
+    // All panel fields have to be present.
     return {
-      layout: {
-        direction: "row",
-        first: "DiagnosticSummary!3edblo1",
-        second: {
+      fetchedLayout: { isLoading: false, data: undefined },
+      search: "",
+      panels: {
+        layout: {
           direction: "row",
-          first: "RosOut!1f38b3d",
-          second: "3D Panel!1my2ydk",
-          splitPercentage: 50,
+          first: "DiagnosticSummary!3edblo1",
+          second: {
+            direction: "row",
+            first: "RosOut!1f38b3d",
+            second: "3D Panel!1my2ydk",
+            splitPercentage: 50,
+          },
+          splitPercentage: 33.3333333333,
         },
-        splitPercentage: 33.3333333333,
+        savedProps: {},
+        globalVariables: {},
+        userNodes: {},
+        linkedGlobalVariables: [],
+        playbackConfig: defaultPlaybackConfig,
+        version: CURRENT_LAYOUT_VERSION,
       },
-      savedProps: {},
-      globalVariables: {},
-      userNodes: {},
-      linkedGlobalVariables: [],
-      playbackConfig: defaultPlaybackConfig,
-      version: CURRENT_LAYOUT_VERSION,
     };
   },
-  getDefaultGlobalVariables: () => ({}),
   migratePanels(panels) {
     const migratePanels = require("webviz-core/migrations").default;
     return migratePanels(panels);
@@ -105,7 +139,7 @@ const defaultHooks = {
     const Root = require("webviz-core/src/components/Root").default;
     return <Root store={store} />;
   },
-  load: () => {
+  load: async () => {
     if (process.env.NODE_ENV === "production" && window.ga) {
       window.ga("create", "UA-82819136-10", "auto");
     } else {
@@ -114,31 +148,23 @@ const defaultHooks = {
       };
     }
     window.ga("send", "pageview");
+
+    const { disableLogEvent } = require("webviz-core/src/util/logEvent");
+    disableLogEvent();
   },
   getWorkerDataProviderWorker: () => {
     return require("webviz-core/src/dataProviders/WorkerDataProvider.worker");
   },
   getAdditionalDataProviders: () => {},
+  getBasicDatatypes: () => require("webviz-core/src/util/datatypes").basicDatatypes,
   experimentalFeaturesList() {
     return {
-      groupLines: {
-        name: "Group Lines When Rendering",
-        description: "A faster method of rendering lines in the 3D panel by grouping them together.",
-        developmentDefault: true,
-        productionDefault: true,
-      },
       diskBagCaching: {
         name: "Disk Bag Caching (requires reload)",
         description:
           "When streaming bag data, persist it on disk, so that when reloading the page we don't have to download the data again. However, this might result in an overall slower experience, and is generally experimental, so we only recommend it if you're on a slow network connection. Alternatively, you can download the bag to disk manually, and drag it into Webviz.",
         developmentDefault: false,
         productionDefault: false,
-      },
-      preloading: {
-        name: "Preloading",
-        description: "Allow panels to use data from caches directly, without playback.",
-        developmentDefault: true,
-        productionDefault: true,
       },
       unlimitedMemoryCache: {
         name: "Unlimited in-memory cache (requires reload)",
@@ -147,9 +173,15 @@ const defaultHooks = {
         developmentDefault: false,
         productionDefault: false,
       },
-      highlightGlobalVariableMatchingMarkers: {
-        name: "Highlight markers matching linked global variables",
-        description: "Markers matching any linkedGlobalVariables will be automatically highlighted in the 3D panel",
+      useGLChartIn2dPlot: {
+        name: "Enable WebGL-based charts for the 2D plot panel",
+        description: "Replaces the Chartjs-based charts with a new implementation using WebGL instead.",
+        developmentDefault: false,
+        productionDefault: false,
+      },
+      useGLChartInPlotPanel: {
+        name: "Enable WebGL-based charts for the Plot panel",
+        description: "Replaces the Chartjs-based charts with a new implementation using WebGL instead.",
         developmentDefault: false,
         productionDefault: false,
       },
@@ -159,6 +191,10 @@ const defaultHooks = {
   getSecondSourceUrlParams() {
     const { REMOTE_BAG_URL_2_QUERY_KEY } = require("webviz-core/src/util/globalConstants");
     return [REMOTE_BAG_URL_2_QUERY_KEY];
+  },
+  updateUrlToTrackLayoutChanges: async ({ _store, _skipPatch }) => {
+    // Persist the layout state in URL or remote storage if needed.
+    await Promise.resolve();
   },
 };
 
@@ -176,38 +212,38 @@ export function resetHooksToDefault() {
   hooks = defaultHooks;
 }
 
-export function loadWebviz(hooksToSet) {
+export async function loadWebviz(hooksToSet) {
   if (hooksToSet) {
     setHooks(hooksToSet);
   }
 
   require("webviz-core/src/styles/global.scss");
+  const Confirm = require("webviz-core/src/components/Confirm").default;
   const prepareForScreenshots = require("webviz-core/src/stories/prepareForScreenshots").default;
   const installDevtoolsFormatters = require("webviz-core/src/util/installDevtoolsFormatters").default;
   const overwriteFetch = require("webviz-core/src/util/overwriteFetch").default;
-  const { hideLoadingLogo } = require("webviz-core/src/util/hideLoadingLogo");
   const { clearIndexedDbWithoutConfirmation } = require("webviz-core/src/util/indexeddb/clearIndexedDb");
+  const waitForFonts = require("webviz-core/src/styles/waitForFonts").default;
 
   prepareForScreenshots(); // For integration screenshot tests.
   installDevtoolsFormatters();
   overwriteFetch();
   window.clearIndexedDb = clearIndexedDbWithoutConfirmation; // For integration tests.
 
-  hooks.load();
+  // In production, hooks.load() will return initializationResult immediately.
+  // In a performance measuring mode, we delay the load while the Polly library
+  // loads so we can record and replay network requests before the app starts.
+  const initializationResult = await hooks.load();
 
-  const waitForFonts = require("webviz-core/src/styles/waitForFonts").default;
-  const Confirm = require("webviz-core/src/components/Confirm").default;
-
-  function render() {
+  async function render() {
     const rootEl = document.getElementById("root");
     if (!rootEl) {
       // appease flow
       throw new Error("missing #root element");
     }
 
-    waitForFonts().then(() => {
-      ReactDOM.render(<hooks.Root history={history} />, rootEl);
-    });
+    await waitForFonts();
+    ReactDOM.render(<hooks.Root history={history} initializationResult={initializationResult} />, rootEl);
   }
 
   // Render a warning message if the user has an old browser.
@@ -215,7 +251,9 @@ export function loadWebviz(hooksToSet) {
   const chromeMatch = navigator.userAgent.match(/Chrom(e|ium)\/([0-9]+)\./);
   const chromeVersion = chromeMatch ? parseInt(chromeMatch[2], 10) : 0;
   if (chromeVersion < MINIMUM_CHROME_VERSION) {
-    hideLoadingLogo();
+    if (window.webviz_hideLoadingLogo) {
+      window.webviz_hideLoadingLogo();
+    }
     Confirm({
       title: "Update your browser",
       prompt:

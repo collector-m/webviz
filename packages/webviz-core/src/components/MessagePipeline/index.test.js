@@ -16,7 +16,8 @@ import FakePlayer from "./FakePlayer";
 import { MAX_PROMISE_TIMEOUT_TIME_MS } from "./pauseFrameForPromise";
 import delay from "webviz-core/shared/delay";
 import signal from "webviz-core/shared/signal";
-import sendNotification from "webviz-core/src/util/sendNotification";
+import tick from "webviz-core/shared/tick";
+import { initializeLogEvent, resetLogEventForTests } from "webviz-core/src/util/logEvent";
 
 jest.setTimeout(MAX_PROMISE_TIMEOUT_TIME_MS * 3);
 
@@ -114,6 +115,43 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
     expect(() => player.emit()).toThrow("New playerState was emitted before last playerState was rendered.");
   });
 
+  it("waits for the previous frame to finish before calling setGlobalVariables again", async () => {
+    let pauseFrame;
+    const player = new FakePlayer();
+    jest.spyOn(player, "setGlobalVariables");
+
+    const promise = signal();
+    const pipeline = mount(
+      <MessagePipelineProvider player={player} globalVariables={{}}>
+        <MessagePipelineConsumer>
+          {(context) => {
+            pauseFrame = context.pauseFrame;
+            promise.resolve();
+            return null;
+          }}
+        </MessagePipelineConsumer>
+      </MessagePipelineProvider>
+    );
+    await Promise.all([promise, tick()]);
+    if (!pauseFrame) {
+      return;
+    }
+
+    expect(player.setGlobalVariables).toHaveBeenCalledWith({});
+    expect(player.setGlobalVariables).toHaveBeenCalledTimes(1);
+    const onFrameRendered = pauseFrame("Wait");
+
+    // Pass in new globalVariables and make sure they aren't used until the frame is done
+    pipeline.setProps({ player, globalVariables: { futureTime: 1 } });
+    await tick();
+    expect(player.setGlobalVariables).toHaveBeenCalledTimes(1);
+
+    // Once the frame is done, setGlobalVariables will be called with the new value
+    onFrameRendered();
+    await tick();
+    expect(player.setGlobalVariables).toHaveBeenCalledWith({ futureTime: 1 });
+  });
+
   it("sets subscriptions", (done) => {
     const player = new FakePlayer();
     let callCount = 0;
@@ -128,15 +166,18 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
               // update the subscriptions immediately after render, not during
               // calling this on the same tick as render causes an error because we're setting state during render loop
               setImmediate(() => {
-                act(() => context.setSubscriptions("test", [{ topic: "/webviz/test" }]));
-                act(() => context.setSubscriptions("bar", [{ topic: "/webviz/test2" }]));
+                act(() => context.setSubscriptions("test", [{ topic: "/webviz/test", format: "parsedMessages" }]));
+                act(() => context.setSubscriptions("bar", [{ topic: "/webviz/test2", format: "parsedMessages" }]));
               });
             }
             if (callCount === 2) {
-              expect(context.subscriptions).toEqual([{ topic: "/webviz/test" }]);
+              expect(context.subscriptions).toEqual([{ topic: "/webviz/test", format: "parsedMessages" }]);
             }
             if (callCount === 3) {
-              expect(context.subscriptions).toEqual([{ topic: "/webviz/test" }, { topic: "/webviz/test2" }]);
+              expect(context.subscriptions).toEqual([
+                { topic: "/webviz/test", format: "parsedMessages" },
+                { topic: "/webviz/test2", format: "parsedMessages" },
+              ]);
               // cause the player to emit a frame outside the render loop to trigger another render
               setImmediate(() => {
                 act(() => {
@@ -386,8 +427,8 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
               // update the subscriptions immediately after render, not during
               // calling this on the same tick as render causes an error because we're setting state during render loop
               setImmediate(() => {
-                act(() => context.setSubscriptions("test", [{ topic: "/webviz/test" }]));
-                act(() => context.setSubscriptions("bar", [{ topic: "/webviz/test2" }]));
+                act(() => context.setSubscriptions("test", [{ topic: "/webviz/test", format: "parsedMessages" }]));
+                act(() => context.setSubscriptions("bar", [{ topic: "/webviz/test2", format: "parsedMessages" }]));
                 act(() => context.setPublishers("test", [{ topic: "/webviz/test", datatype: "test" }]));
                 wait.resolve();
               });
@@ -400,7 +441,10 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
     await wait;
     const player2 = new FakePlayer();
     act(() => el.setProps({ player: player2 }) && undefined);
-    expect(player2.subscriptions).toEqual([{ topic: "/webviz/test" }, { topic: "/webviz/test2" }]);
+    expect(player2.subscriptions).toEqual([
+      { topic: "/webviz/test", format: "parsedMessages" },
+      { topic: "/webviz/test2", format: "parsedMessages" },
+    ]);
     expect(player2.publishers).toEqual([{ topic: "/webviz/test", datatype: "test" }]);
   });
 
@@ -414,6 +458,7 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
     );
     const activeData = {
       messages: [],
+      bobjects: [],
       messageOrder: "receiveTime",
       currentTime: { sec: 0, nsec: 0 },
       startTime: { sec: 0, nsec: 0 },
@@ -423,8 +468,9 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
       lastSeekTime: 1234,
       topics: [{ name: "/input/foo", datatype: "foo" }],
       datatypes: { foo: { fields: [] } },
-      messageDefinitionsByTopic: {},
+      parsedMessageDefinitionsByTopic: {},
       playerWarnings: {},
+      totalBytesReceived: 1234,
     };
     await act(() => player.emit(activeData));
     expect(fn).toHaveBeenCalledTimes(2);
@@ -452,13 +498,14 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
       </MessagePipelineProvider>
     );
     expect(fn).toHaveBeenCalledTimes(1);
-    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test" }]));
+    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test", format: "parsedMessages" }]));
     expect(fn).toHaveBeenCalledTimes(2);
     expect(console.warn).toHaveBeenCalledTimes(0);
 
     // Emit activeData.
     const activeData = {
       messages: [],
+      bobjects: [],
       messageOrder: "receiveTime",
       currentTime: { sec: 0, nsec: 0 },
       startTime: { sec: 0, nsec: 0 },
@@ -468,32 +515,46 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
       lastSeekTime: 1234,
       topics: [{ name: "/input/foo", datatype: "foo" }],
       datatypes: { foo: { fields: [] } },
-      messageDefinitionsByTopic: {},
+      parsedMessageDefinitionsByTopic: {},
       playerWarnings: {},
+      totalBytesReceived: 1234,
     };
     await act(() => player.emit(activeData));
     expect(fn).toHaveBeenCalledTimes(3);
 
-    // Calling setSubscriptions right after activeData is emitted results in a warning.
-    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test" }]));
+    // Calling setSubscriptions right after activeData is ok if the set of topics doesn't change
+    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test", format: "bobjects" }]));
+    // $FlowFixMe - Flow doesn't understand `console.warn.mock`
+    expect(console.warn.mock.calls).toEqual([]);
+    // But changing the set of topics results in a warning
+    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test2", format: "parsedMessages" }]));
     // $FlowFixMe - Flow doesn't understand `console.warn.mock`
     expect(console.warn.mock.calls).toEqual([
       [
-        "Panel subscribed right after Player loaded, which causes unnecessary requests. Please let the Webviz team know about this. Topics: /test",
+        "Panel subscribed right after Player loaded, which causes unnecessary requests. Please let the Webviz team know about this. Topics: /test2",
       ],
     ]);
 
     // If we wait a little bit, we shouldn't get any additional warnings.
     await delay(WARN_ON_SUBSCRIPTIONS_WITHIN_TIME_MS + 200);
-    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test" }]));
+    act(() => fn.mock.calls[0][0].setSubscriptions("id", [{ topic: "/test", format: "parsedMessages" }]));
     // $FlowFixMe - Flow doesn't understand `console.warn.mock`
     expect(console.warn.mock.calls.length).toEqual(1);
   });
 
   describe("pauseFrame", () => {
-    let pauseFrame, player, el;
+    let pauseFrame, player, el, logger;
 
     beforeEach(async () => {
+      logger = jest.fn();
+      resetLogEventForTests();
+      initializeLogEvent(
+        // $FlowFixMe
+        { logEventError: logger },
+        { PAUSE_FRAME_TIMEOUT: "pause_frame_timeout" },
+        {}
+      );
+
       player = new FakePlayer();
       el = mount(
         <MessagePipelineProvider player={player}>
@@ -507,6 +568,10 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
       );
 
       await delay(20);
+    });
+
+    afterEach(() => {
+      resetLogEventForTests();
     });
 
     it("frames automatically resolve without calling pauseFrame", async () => {
@@ -614,8 +679,7 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
 
       await delay(MAX_PROMISE_TIMEOUT_TIME_MS + 20);
       expect(hasFinishedFrame).toEqual(true);
-
-      sendNotification.expectCalledDuringTest();
+      expect(logger).toHaveBeenCalled();
     });
 
     it("Adding multiple promises that do not resolve eventually results in an error, and then continues playing", async () => {
@@ -635,8 +699,7 @@ describe("MessagePipelineProvider/MessagePipelineConsumer", () => {
 
       await delay(MAX_PROMISE_TIMEOUT_TIME_MS + 20);
       expect(hasFinishedFrame).toEqual(true);
-
-      sendNotification.expectCalledDuringTest();
+      expect(logger).toHaveBeenCalled();
     });
 
     it("does not accidentally resolve the second player's promise when replacing the player", async () => {

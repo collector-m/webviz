@@ -25,11 +25,10 @@ import {
   ErrorCodes,
   type NodeData,
   type Diagnostic,
-  type PlayerInfo,
   type NodeDataTransformer,
 } from "webviz-core/src/players/UserNodePlayer/types";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
-import { DEFAULT_WEBVIZ_NODE_PREFIX } from "webviz-core/src/util/globalConstants";
+import { DEFAULT_WEBVIZ_NODE_PREFIX, $WEBVIZ_SOURCE_2 } from "webviz-core/src/util/globalConstants";
 import sendNotification from "webviz-core/src/util/sendNotification";
 
 // Typescript is required since the `import` syntax breaks VSCode, presumably
@@ -38,15 +37,18 @@ import sendNotification from "webviz-core/src/util/sendNotification";
 // source code.
 const ts = require("typescript/lib/typescript");
 
+export const hasTransformerErrors = (nodeData: NodeData): boolean =>
+  nodeData.diagnostics.some(({ severity }) => severity === DiagnosticSeverity.Error);
+
 export const getInputTopics = (nodeData: NodeData): NodeData => {
-  const { sourceFile, typeChecker } = nodeData;
   // Do not attempt to run if there were any previous errors.
-  if (nodeData.diagnostics.find(({ severity }) => severity === DiagnosticSeverity.Error)) {
+  if (hasTransformerErrors(nodeData)) {
     return nodeData;
   }
 
+  const { sourceFile, typeChecker } = nodeData;
   if (!sourceFile || !typeChecker) {
-    throw new Error("Either the sourceFile or typeChecker is absent'. There is a problem with the `compile` step.");
+    throw new Error("Either the 'sourceFile' or 'typeChecker' is absent. There is a problem with the `compile` step.");
   }
 
   if (!sourceFile.symbol) {
@@ -138,8 +140,12 @@ export const getOutputTopic = (nodeData: NodeData): NodeData => {
   };
 };
 
-export const validateInputTopics = (nodeData: NodeData, playerStateActiveData: ?$ReadOnly<PlayerInfo>): NodeData => {
-  const badInputTopic = nodeData.inputTopics.find((topic) => topic.startsWith(DEFAULT_WEBVIZ_NODE_PREFIX));
+export const validateInputTopics = (nodeData: NodeData, topics: Topic[]): NodeData => {
+  const badInputTopic = nodeData.inputTopics.find(
+    (topic) =>
+      topic.startsWith(DEFAULT_WEBVIZ_NODE_PREFIX) ||
+      topic.startsWith(`${$WEBVIZ_SOURCE_2}${DEFAULT_WEBVIZ_NODE_PREFIX}`)
+  );
   if (badInputTopic) {
     const error = {
       severity: DiagnosticSeverity.Error,
@@ -155,16 +161,28 @@ export const validateInputTopics = (nodeData: NodeData, playerStateActiveData: ?
   }
 
   const { inputTopics } = nodeData;
-  const activeTopics = ((playerStateActiveData && playerStateActiveData.topics) || []).map(({ name }) => name);
+  const activeTopics = topics.map(({ name }) => name);
   const diagnostics = [];
   for (const inputTopic of inputTopics) {
     if (!activeTopics.includes(inputTopic)) {
       diagnostics.push({
         severity: DiagnosticSeverity.Error,
-        message: `Input "${inputTopic}" is not yet available`,
+        message: `Input "${inputTopic}" is not yet available.`,
         source: Sources.InputTopicsChecker,
         code: ErrorCodes.InputTopicsChecker.NO_TOPIC_AVAIL,
       });
+    }
+
+    if (nodeData.enableSecondSource) {
+      const prefixedTopic = `${$WEBVIZ_SOURCE_2}${inputTopic}`;
+      if (!activeTopics.includes(prefixedTopic)) {
+        diagnostics.push({
+          severity: DiagnosticSeverity.Warning,
+          message: `Input "${prefixedTopic}" is not yet available.`,
+          source: Sources.InputTopicsChecker,
+          code: ErrorCodes.InputTopicsChecker.NO_TOPIC_AVAIL,
+        });
+      }
     }
   }
 
@@ -174,13 +192,20 @@ export const validateInputTopics = (nodeData: NodeData, playerStateActiveData: ?
   };
 };
 
-export const validateOutputTopic = (
-  nodeData: NodeData,
-  playerStateActiveData: ?$ReadOnly<PlayerInfo>,
-  priorRegisteredTopics: $ReadOnlyArray<Topic>
-): NodeData => {
-  const { outputTopic } = nodeData;
+export const checkForMultiSourceSupport = (nodeData: NodeData, topics: Topic[]): NodeData => {
+  // Only add support if there's at least one source two topic available from the Player
+  const secondSourceTopicsPresent = topics.some((topic) => topic.name.startsWith($WEBVIZ_SOURCE_2));
+  const enableSecondSource =
+    secondSourceTopicsPresent && !nodeData.inputTopics.some((topicName) => topicName.startsWith($WEBVIZ_SOURCE_2));
 
+  return {
+    ...nodeData,
+    enableSecondSource,
+  };
+};
+
+export const validateOutputTopic = (nodeData: NodeData): NodeData => {
+  const { outputTopic } = nodeData;
   if (!outputTopic.startsWith(DEFAULT_WEBVIZ_NODE_PREFIX)) {
     return {
       ...nodeData,
@@ -195,22 +220,6 @@ export const validateOutputTopic = (
       ],
     };
   }
-
-  if (priorRegisteredTopics.some((topic) => topic.name === outputTopic)) {
-    return {
-      ...nodeData,
-      diagnostics: [
-        ...nodeData.diagnostics,
-        {
-          severity: DiagnosticSeverity.Error,
-          message: `Output "${outputTopic}" must be unique`,
-          source: Sources.OutputTopicChecker,
-          code: ErrorCodes.OutputTopicChecker.NOT_UNIQUE,
-        },
-      ],
-    };
-  }
-
   return nodeData;
 };
 
@@ -227,6 +236,18 @@ export const compile = (nodeData: NodeData): NodeData => {
     const error: Diagnostic = {
       severity: DiagnosticSeverity.Error,
       message: `The filename of your node "${nodeData.name}" must start with "/webviz_node/."`,
+      source: Sources.Other,
+      code: ErrorCodes.Other.FILENAME,
+    };
+    return {
+      ...nodeData,
+      diagnostics: [...nodeData.diagnostics, error],
+    };
+  }
+  if (nodeData.name.replace(DEFAULT_WEBVIZ_NODE_PREFIX, "").includes("/")) {
+    const error: Diagnostic = {
+      severity: DiagnosticSeverity.Error,
+      message: `Your node "${nodeData.name}" cannot contain more than two forward slashes.`,
       source: Sources.Other,
       code: ErrorCodes.Other.FILENAME,
     };
@@ -324,15 +345,40 @@ export const compile = (nodeData: NodeData): NodeData => {
   };
 };
 
+// Currently we only look types matching the exact name "GlobalVariables". In the future,
+// we should check the type of the 2nd arg passed to the publisher function in
+// case users have renamed the GlobalVariables type.
+export const extractGlobalVariables = (nodeData: NodeData): NodeData => {
+  // Do not attempt to run if there were any compile time errors.
+  if (hasTransformerErrors(nodeData)) {
+    return nodeData;
+  }
+
+  const { sourceFile } = nodeData;
+  if (!sourceFile) {
+    throw new Error("'sourceFile' is absent'. There is a problem with the `compile` step.");
+  }
+
+  // If the GlobalVariables type isn't defined, that's ok.
+  const globalVariablesTypeSymbol = sourceFile.locals.get("GlobalVariables");
+  const memberSymbolsByName = globalVariablesTypeSymbol?.declarations[0]?.type?.symbol?.members ?? new Map();
+  const globalVariables = [...memberSymbolsByName.keys()];
+
+  return {
+    ...nodeData,
+    globalVariables,
+  };
+};
+
 export const extractDatatypes = (nodeData: NodeData): NodeData => {
   // Do not attempt to run if there were any compile time errors.
-  if (nodeData.diagnostics.find(({ severity }) => severity === DiagnosticSeverity.Error)) {
+  if (hasTransformerErrors(nodeData)) {
     return nodeData;
   }
 
   const { sourceFile, typeChecker, name, datatypes: sourceDatatypes } = nodeData;
   if (!sourceFile || !typeChecker) {
-    throw new Error("Either the sourceFile or typeChecker is absent'. There is a problem with the `compile` step.");
+    throw new Error("Either the 'sourceFile' or 'typeChecker' is absent'. There is a problem with the `compile` step.");
   }
 
   // Keys each message definition like { 'std_msg__ColorRGBA': 'std_msg/ColorRGBA' }
@@ -354,7 +400,7 @@ export const extractDatatypes = (nodeData: NodeData): NodeData => {
 
     // If we've hit this case, then we should fix it.
     sendNotification(
-      "Unknown error encountered in Node Playground. Please report to the webviz team.",
+      "Unknown error encountered in Node Playground. Please report to the webviz team",
       error,
       "app",
       "error"
@@ -379,11 +425,11 @@ TODO:
   - what happens when the `register` portion of the node pipeline fails to instantiate the code? can we get the stack trace?
 */
 export const compose = (...transformers: NodeDataTransformer[]): NodeDataTransformer => {
-  return (nodeData: NodeData, playerState: ?$ReadOnly<PlayerInfo>, priorRegisteredTopics: $ReadOnlyArray<Topic>) => {
+  return (nodeData: NodeData, topics: Topic[]) => {
     let newNodeData = nodeData;
     // TODO: try/catch here?
     for (const transformer of transformers) {
-      newNodeData = transformer(newNodeData, playerState, priorRegisteredTopics);
+      newNodeData = transformer(newNodeData, topics);
     }
     return newNodeData;
   };
@@ -404,15 +450,13 @@ export const compose = (...transformers: NodeDataTransformer[]): NodeDataTransfo
 const transform = ({
   name,
   sourceCode,
-  playerInfo,
-  priorRegisteredTopics,
+  topics,
   rosLib,
   datatypes,
 }: {
   name: string,
   sourceCode: string,
-  playerInfo: ?$ReadOnly<PlayerInfo>,
-  priorRegisteredTopics: $ReadOnlyArray<Topic>,
+  topics: Topic[],
   rosLib: string,
   datatypes: RosDatatypes,
 }): NodeData & { sourceFile: ?void, typeChecker: ?void } => {
@@ -421,8 +465,10 @@ const transform = ({
     validateOutputTopic,
     compile,
     getInputTopics,
+    checkForMultiSourceSupport,
     validateInputTopics,
-    extractDatatypes
+    extractDatatypes,
+    extractGlobalVariables
   );
 
   const result = transformer(
@@ -436,12 +482,13 @@ const transform = ({
       outputTopic: "",
       outputDatatype: "",
       diagnostics: [],
+      globalVariables: [],
       datatypes,
       sourceFile: undefined,
       typeChecker: undefined,
+      enableSecondSource: false,
     },
-    playerInfo,
-    priorRegisteredTopics
+    topics
   );
   return { ...result, sourceFile: null, typeChecker: null };
 };

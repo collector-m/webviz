@@ -18,10 +18,13 @@ export const STextField = styled.div`
   flex-direction: column;
 `;
 
-export const STextFieldLabel = styled.label`
+export const STextFieldLabel = styled.label(
+  ({ disabled }) => `
   margin: 8px 0;
-  color: ${colors.GRAY};
-`;
+  color: ${colors.LIGHT};
+  opacity: ${disabled ? 0.5 : 1};
+`
+);
 
 export const SError = styled.div`
   color: ${colors.RED};
@@ -66,59 +69,44 @@ export default function TextField({
   const prevIncomingVal = useRef("");
   const inputRef = useRef(null);
 
-  useLayoutEffect(
-    () => {
-      // only compare if it's a controlled component
-      if (!defaultValue && !validateOnBlur && prevIncomingVal.current !== value) {
-        const validationResult = validator(value);
-        setError(validationResult || null);
-        setInputStr(value || "");
-      }
-      prevIncomingVal.current = value;
-    },
-    [defaultValue, validateOnBlur, validator, value]
-  );
+  useLayoutEffect(() => {
+    // only compare if it's a controlled component
+    if (!defaultValue && !validateOnBlur && prevIncomingVal.current !== value) {
+      const validationResult = validator(value);
+      setError(validationResult || null);
+      setInputStr(value || "");
+    }
+    prevIncomingVal.current = value;
+  }, [defaultValue, validateOnBlur, validator, value]);
 
-  useLayoutEffect(
-    () => {
-      if (inputRef.current && focusOnMount) {
-        inputRef.current.focus();
-      }
-    },
-    [focusOnMount]
-  );
+  useLayoutEffect(() => {
+    if (inputRef.current && focusOnMount) {
+      inputRef.current.focus();
+    }
+  }, [focusOnMount]);
 
-  useLayoutEffect(
-    () => {
-      if (onError) {
-        onError(error);
-      }
-    },
-    [error, onError]
-  );
+  useLayoutEffect(() => {
+    if (onError) {
+      onError(error);
+    }
+  }, [error, onError]);
 
-  const validate = useCallback(
-    (val) => {
-      const validationResult = validator(val);
-      if (validationResult) {
-        setError(validationResult);
-      } else {
-        setError(null);
-        onChange(val);
-      }
-    },
-    [onChange, validator]
-  );
+  const validate = useCallback((val) => {
+    const validationResult = validator(val);
+    if (validationResult) {
+      setError(validationResult);
+    } else {
+      setError(null);
+      onChange(val);
+    }
+  }, [onChange, validator]);
 
-  const handleChange = useCallback(
-    ({ target }) => {
-      setInputStr(target.value);
-      if (!validateOnBlur) {
-        validate(target.value);
-      }
-    },
-    [validate, validateOnBlur]
-  );
+  const handleChange = useCallback(({ target }) => {
+    setInputStr(target.value);
+    if (!validateOnBlur) {
+      validate(target.value);
+    }
+  }, [validate, validateOnBlur]);
 
   const handleBlur = useCallback(
     () => {

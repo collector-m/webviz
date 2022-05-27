@@ -8,15 +8,13 @@
 import { useCleanup } from "@cruise-automation/hooks";
 import memoizeWeak from "memoize-weak";
 import { useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { MessageReader, parseMessageDefinition } from "rosbag";
 import uuid from "uuid";
 
-import { getExperimentalFeature } from "webviz-core/src/components/ExperimentalFeatures";
 import { useMessagePipeline } from "webviz-core/src/components/MessagePipeline";
 import PanelContext from "webviz-core/src/components/PanelContext";
 import type { MemoryCacheBlock } from "webviz-core/src/dataProviders/MemoryCacheDataProvider";
 import ParsedMessageCache from "webviz-core/src/dataProviders/ParsedMessageCache";
-import type { SubscribePayload, TypedMessage } from "webviz-core/src/players/types";
+import type { SubscribePayload, BobjectMessage } from "webviz-core/src/players/types";
 import { useShallowMemo } from "webviz-core/src/util/hooks";
 
 // Preloading users can (optionally) share this cache of recently parsed messages if they think
@@ -27,19 +25,14 @@ export const blockMessageCache = new ParsedMessageCache();
 // anyone who asks for binary data probably wants to parse it and cache it somehow, so give the
 // user a parser and the messages in a block-format useful for caching.
 
-type MessageBlock = $ReadOnly<{
-  [topicName: string]: $ReadOnlyArray<TypedMessage<ArrayBuffer>>,
+export type MessageBlock = $ReadOnly<{
+  [topicName: string]: $ReadOnlyArray<BobjectMessage>,
 }>;
 
-type BlocksForTopics = {|
-  // TODO(jp/steel): Figure out whether it's better to return message definitions here. It's
-  // possible consumers will want to pass the readers through worker boundaries.
-  messageReadersByTopic: { [topicName: string]: MessageReader },
-  // Semantics of blocks: Missing topics have not been cached. Adjacent elements are contiguous
-  // in time. Corresponding indexes in different BlocksForTopics cover the same time-range. Blocks
-  // are stored in increasing order of time.
-  blocks: $ReadOnlyArray<MessageBlock>,
-|};
+// Semantics of blocks: Missing topics have not been cached. Adjacent elements are contiguous
+// in time. Corresponding indexes in different BlocksForTopics cover the same time-range. Blocks
+// are stored in increasing order of time.
+export type BlocksForTopics = $ReadOnlyArray<MessageBlock>;
 
 // Memoization probably won't speed up the filtering appreciably, but preserves return identity.
 // That said, MessageBlock identity will change when the set of topics changes, so consumers should
@@ -65,26 +58,23 @@ const filterBlockByTopics = memoizeWeak(
   }
 );
 
-const useSubscribeToTopicsForBlocks = (topics: $ReadOnlyArray<string>) => {
+export const useSubscribeToTopicsForBlocks = (topics: $ReadOnlyArray<string>) => {
   const [id] = useState(() => uuid.v4());
   const { type: panelType = undefined } = useContext(PanelContext) || {};
 
-  const setSubscriptions = useMessagePipeline(
-    useCallback(({ setSubscriptions: pipelineSetSubscriptions }) => pipelineSetSubscriptions, [])
+  const { setSubscriptions } = useMessagePipeline(
+    useCallback((messagePipeline) => ({ setSubscriptions: messagePipeline.setSubscriptions }), [])
   );
-  const subscriptions: SubscribePayload[] = useMemo(
-    () => {
-      const requester = panelType ? { type: "panel", name: panelType } : undefined;
-      return topics.map((topic) => ({ topic, requester, onlyLoadInBlocks: true }));
-    },
-    [panelType, topics]
-  );
+  const subscriptions: SubscribePayload[] = useMemo(() => {
+    const requester = panelType ? { type: "panel", name: panelType } : undefined;
+    return topics.map((topic) => ({ topic, requester, format: "bobjects" }));
+  }, [panelType, topics]);
   useEffect(() => setSubscriptions(id, subscriptions), [id, setSubscriptions, subscriptions]);
   useCleanup(() => setSubscriptions(id, []));
 };
 
-function getBlocksFromPlayerState({ playerState }): ?$ReadOnlyArray<?MemoryCacheBlock> {
-  return playerState.progress.messageCache?.blocks;
+function getBlocksFromPlayerState({ playerState }): { allBlocks: ?$ReadOnlyArray<?MemoryCacheBlock> } {
+  return { allBlocks: playerState.progress.messageCache?.blocks };
 }
 
 // A note: for the moment,
@@ -99,50 +89,18 @@ export function useBlocksByTopic(topics: $ReadOnlyArray<string>): BlocksForTopic
   // Subscribe to the topics
   useSubscribeToTopicsForBlocks(requestedTopics);
 
-  // Get player data needed.
-  const messageDefinitionsByTopic = useMessagePipeline(
-    useCallback(({ playerState }) => playerState.activeData?.messageDefinitionsByTopic, [])
-  );
-
   // Get blocks for the topics
-  const allBlocks = useMessagePipeline<?$ReadOnlyArray<?MemoryCacheBlock>>(getBlocksFromPlayerState);
+  const { allBlocks } = useMessagePipeline<{ allBlocks: ?$ReadOnlyArray<?MemoryCacheBlock> }>(getBlocksFromPlayerState);
 
-  const exposeBlockData = !!allBlocks && getExperimentalFeature("preloading");
-
-  const messageReadersByTopic = useMemo(
-    () => {
-      if (!exposeBlockData) {
-        // Do not provide any readers if the player does not provide blocks. A missing reader
-        // signals that binary data will never appear for a topic.
-        return {};
-      }
-      const result = {};
-      for (const topic of requestedTopics) {
-        if (messageDefinitionsByTopic && messageDefinitionsByTopic[topic]) {
-          const definition = messageDefinitionsByTopic[topic];
-          const parsedDefinition = typeof definition === "string" ? parseMessageDefinition(definition) : definition;
-          result[topic] = new MessageReader(parsedDefinition);
-        }
-      }
-      return result;
-    },
-    [messageDefinitionsByTopic, requestedTopics, exposeBlockData]
-  );
-  const presentTopics = useMemo(() => Object.keys(messageReadersByTopic), [messageReadersByTopic]);
-
-  const blocks = useMemo(
-    () => {
-      if (!allBlocks) {
-        return [];
-      }
-      const ret = [];
-      // Note: allBlocks.map() misbehaves, because allBlocks is initialized like "new Array(...)".
-      for (let i = 0; i < allBlocks.length; ++i) {
-        ret.push(filterBlockByTopics(allBlocks[i], presentTopics));
-      }
-      return ret;
-    },
-    [allBlocks, presentTopics]
-  );
-  return useShallowMemo({ messageReadersByTopic, blocks });
+  return useMemo(() => {
+    if (!allBlocks) {
+      return [];
+    }
+    const ret = [];
+    // Note: allBlocks.map() misbehaves, because allBlocks is initialized like "new Array(...)".
+    for (let i = 0; i < allBlocks.length; ++i) {
+      ret.push(filterBlockByTopics(allBlocks[i], requestedTopics));
+    }
+    return ret;
+  }, [allBlocks, requestedTopics]);
 }

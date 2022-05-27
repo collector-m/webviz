@@ -10,10 +10,10 @@ import * as React from "react";
 import { PolygonBuilder, Polygon } from "regl-worldview";
 import styled from "styled-components";
 
+import { polygonPointsValidator } from "webviz-core/shared/validators";
 import Button from "webviz-core/src/components/Button";
 import PanelContext from "webviz-core/src/components/PanelContext";
 import ValidatedInput, { type EditFormat } from "webviz-core/src/components/ValidatedInput";
-import { polygonPointsValidator } from "webviz-core/src/components/validators";
 import { SValue, SLabel } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/Interactions";
 import {
   polygonsToPoints,
@@ -39,12 +39,24 @@ type Props = {
 
 export default function Polygons({ onSetPolygons, polygonBuilder, selectedPolygonEditFormat }: Props) {
   const { saveConfig } = React.useContext(PanelContext) || {};
-  const polygons: Polygon[] = polygonBuilder.polygons;
-  const [polygonPoints, setPolygonPoints] = React.useState<Point2D[][]>(() => polygonsToPoints(polygons));
-  function polygonBuilderOnChange() {
-    setPolygonPoints(polygonsToPoints(polygons));
-  }
-  polygonBuilder.onChange = polygonBuilderOnChange;
+  const [polygonPoints, setPolygonPoints] = React.useState<Point2D[][]>(() =>
+    polygonsToPoints(polygonBuilder.polygons)
+  );
+
+  polygonBuilder.onChange = () => setPolygonPoints(polygonsToPoints(polygonBuilder.polygons));
+
+  const onChangePolygonPoints = React.useCallback((newPolygonPoints) => {
+    if (newPolygonPoints) {
+      setPolygonPoints(newPolygonPoints);
+      onSetPolygons(pointsToPolygons(newPolygonPoints));
+    }
+  }, [onSetPolygons]);
+
+  const clearPolygons = React.useCallback(() => onChangePolygonPoints([]), [onChangePolygonPoints]);
+
+  const copyPolygons = React.useCallback(() => {
+    clipboard.copy(getFormattedString(polygonPoints, selectedPolygonEditFormat));
+  }, [polygonPoints, selectedPolygonEditFormat]);
 
   return (
     <>
@@ -52,19 +64,12 @@ export default function Polygons({ onSetPolygons, polygonBuilder, selectedPolygo
         format={selectedPolygonEditFormat}
         value={polygonPoints}
         onSelectFormat={(selectedFormat) => saveConfig({ selectedPolygonEditFormat: selectedFormat })}
-        onChange={(newPolygonPoints) => {
-          if (newPolygonPoints) {
-            setPolygonPoints(newPolygonPoints);
-            onSetPolygons(pointsToPolygons(newPolygonPoints));
-          }
-        }}
+        onChange={onChangePolygonPoints}
         dataValidator={polygonPointsValidator}>
-        <Button
-          small
-          tooltip="Copy Polygons"
-          onClick={() => {
-            clipboard.copy(getFormattedString(polygonPoints, selectedPolygonEditFormat));
-          }}>
+        <Button small tooltip="Clear Polygons" onClick={clearPolygons}>
+          Clear
+        </Button>
+        <Button small tooltip="Copy Polygons" onClick={copyPolygons}>
           Copy
         </Button>
       </ValidatedInput>

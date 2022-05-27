@@ -18,6 +18,10 @@ Please see the individual package READMEs for details on how to install and use 
 
 We have a [Slack workspace](https://github.com/cruise-automation/webviz/issues/461) to make it easier to ask questions and chat with other people who use Webviz. Join using the latest link posted [here](https://github.com/cruise-automation/webviz/issues/461).
 
+## Foxglove
+
+[Foxglove Studio](https://foxglove.dev/) is a fork of Webviz that was started by former Cruise employees. The tools have the same purpose (visualizing ROS data), but Cruise does not currently offer commercial support for Webviz, and community support can be ad-hoc. Webviz also has a slightly different feature set than Foxglove. Check out Foxglove if Webviz does not currently meet your needs.
+
 ## How to use Webviz
 
 We have in-app help resources. Go to the [application](https://webviz.io/app/) and click the "?" icon in the top right. Each individual panel also has a "?" icon in its top right.
@@ -40,7 +44,6 @@ docker run -p 8080:8080 cruise/webviz
 
 ```sh
 npm run bootstrap # install dependencies
-npm run build # build all packages
 npm run build-static-webviz # generate static build in __static_webviz__
 npm run serve-static-webviz # serve static build on localhost:8080
 ```
@@ -48,6 +51,7 @@ npm run serve-static-webviz # serve static build on localhost:8080
 ## Recording videos
 
 Prerequisites:
+
 - `npm run bootstrap` to install dependencies
 - Install [FFmpeg](https://ffmpeg.org/): `apt-get install ffmpeg` or `brew install ffmpeg` or so.
 - Download the ROS bag to your local machine, and also save the layout to a `.json` file.
@@ -67,9 +71,29 @@ Similarly to recording videos, we have a script to measure the performance of a 
 
 ## Developing
 
+To install dependencies, first run `npm run bootstrap`. This command will populate the repos root `/node_modules` and underyling packages `/node_modules`. From there, you have a few options depending on where you'd like to make changes.
+
+### Webviz Core
+
+`npm run webviz-dev`
+
+### Docs
+
+`npm run docs-dev`
+
+### Storybook
+
+`npm run storybook`
+
+Useful for `regl-worldview` changes.
+
+### Full list of scripts
+
+- `npm run webviz-dev` to run a webviz-only server that you can develop Webviz on.
 - `npm run bootstrap` in the root directory to install dependencies.
 - `npm run build` to run a single build or `npm run watch` to watch and build.
-- `npm run docs` to run the docs app (e.g. go to http://localhost:8080/app to open Webviz). Requires `build` to be run first.
+- `npm run docs-dev` to run the docs app (e.g. go to http://localhost:8080/app to open Webviz). Requires `build` to be run first.
+- `npm run docs-deploy` to deploy the docs to https://webviz.io/.
 - `npm run storybook` to run storybook. Requires `build` to be run first.
 - `npm run screenshot-local` or `npm run screenshot-local-debug` to generate screenshots from stories.
 - `npm run lint` to run the linters (and `npm run lint:fix` to automatically fix issues).

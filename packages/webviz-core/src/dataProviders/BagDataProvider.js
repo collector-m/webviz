@@ -17,13 +17,17 @@ import type {
   DataProviderDescriptor,
   Connection,
   ExtensionPoint,
+  GetMessagesResult,
+  GetMessagesTopics,
   InitializationResult,
-  PerformanceMetadata,
+  AverageThroughput,
 } from "webviz-core/src/dataProviders/types";
+import { getReportMetadataForChunk } from "webviz-core/src/dataProviders/util";
 import type { Message } from "webviz-core/src/players/types";
-import { bagConnectionsToDatatypes, bagConnectionsToTopics } from "webviz-core/src/util/bagConnectionsHelper";
+import { objectValues } from "webviz-core/src/util";
+import { bagConnectionsToTopics } from "webviz-core/src/util/bagConnectionsHelper";
 import { getBagChunksOverlapCount } from "webviz-core/src/util/bags";
-import CachedFilelike from "webviz-core/src/util/CachedFilelike";
+import CachedFilelike, { type FileReader } from "webviz-core/src/util/CachedFilelike";
 import Logger from "webviz-core/src/util/Logger";
 import sendNotification from "webviz-core/src/util/sendNotification";
 import { fromMillis, subtractTimes } from "webviz-core/src/util/time";
@@ -45,26 +49,19 @@ function reportMalformedError(operation: string, error: Error): void {
   );
 }
 
-type TimedPerformanceMetadata = {|
+type TimedDataThroughput = {|
   startTime: Time,
   endTime: Time,
-  data: PerformanceMetadata,
+  data: AverageThroughput,
 |};
-export const statsAreAdjacent = (a: TimedPerformanceMetadata, b: TimedPerformanceMetadata): boolean => {
-  return (
-    isEqual(a.data.topics, b.data.topics) &&
-    a.data.inputSource === b.data.inputSource &&
-    a.data.inputType === b.data.inputType &&
-    isEqual(TimeUtil.add(a.endTime, { sec: 0, nsec: 1 }), b.startTime)
-  );
+export const statsAreAdjacent = (a: TimedDataThroughput, b: TimedDataThroughput): boolean => {
+  return isEqual(a.data.topics, b.data.topics) && isEqual(TimeUtil.add(a.endTime, { sec: 0, nsec: 1 }), b.startTime);
 };
-export const mergeStats = (a: TimedPerformanceMetadata, b: TimedPerformanceMetadata): TimedPerformanceMetadata => ({
+export const mergeStats = (a: TimedDataThroughput, b: TimedDataThroughput): TimedDataThroughput => ({
   startTime: a.startTime,
   endTime: b.endTime,
   data: {
     // Don't spread here, we need to update this function if we add fields.
-    inputSource: a.data.inputSource,
-    inputType: a.data.inputType,
     topics: a.data.topics,
     type: a.data.type,
     totalSizeOfMessages: a.data.totalSizeOfMessages + b.data.totalSizeOfMessages,
@@ -75,13 +72,31 @@ export const mergeStats = (a: TimedPerformanceMetadata, b: TimedPerformanceMetad
   },
 });
 
+// A FileReader that "spies" on data callbacks. Used to log data consumed.
+class LogMetricsReader {
+  _reader: FileReader;
+  _extensionPoint: ExtensionPoint;
+  constructor(reader: FileReader, extensionPoint: ExtensionPoint) {
+    this._reader = reader;
+    this._extensionPoint = extensionPoint;
+  }
+  open() {
+    return this._reader.open();
+  }
+  fetch(offset: number, length: number) {
+    const stream = this._reader.fetch(offset, length);
+    stream.on("data", getReportMetadataForChunk(this._extensionPoint));
+    return stream;
+  }
+}
+
 // Read from a ROS Bag. `bagPath` can either represent a local file, or a remote bag. See
 // `BrowserHttpReader` for how to set up a remote server to be able to directly stream from it.
 // Returns raw messages that still need to be parsed by `ParseMessagesDataProvider`.
 export default class BagDataProvider implements DataProvider {
   _options: Options;
   _bag: Bag;
-  _lastPerformanceStatsToLog: ?TimedPerformanceMetadata;
+  _lastPerformanceStatsToLog: ?TimedDataThroughput;
   _extensionPoint: ?ExtensionPoint;
 
   constructor(options: Options, children: DataProviderDescriptor[]) {
@@ -97,7 +112,7 @@ export default class BagDataProvider implements DataProvider {
     await decompress.isLoaded;
 
     if (bagPath.type === "remoteBagUrl") {
-      const fileReader = new BrowserHttpReader(bagPath.url);
+      const fileReader = new LogMetricsReader(new BrowserHttpReader(bagPath.url), extensionPoint);
       const remoteReader = new CachedFilelike({
         fileReader,
         cacheSizeInBytes: cacheSizeInBytes || 1024 * 1024 * 200, // 200MiB
@@ -120,13 +135,18 @@ export default class BagDataProvider implements DataProvider {
       this._bag = new Bag(new BagReader(remoteReader));
       await this._bag.open();
     } else {
-      this._bag = await open(bagPath.file);
+      if (process.env.NODE_ENV === "test" && typeof bagPath.file !== "string") {
+        // Rosbag's `Bag.open` does not accept files in the "node" environment.
+        this._bag = await open(bagPath.file.name);
+      } else {
+        this._bag = await open(bagPath.file);
+      }
     }
 
     const { startTime, endTime, chunkInfos } = this._bag;
     const connections: Connection[] = [];
     const emptyConnections: any[] = [];
-    for (const connection: any of Object.values(this._bag.connections)) {
+    for (const connection of objectValues(this._bag.connections)) {
       const { messageDefinition, md5sum, topic, type } = connection;
       if (messageDefinition && md5sum && topic && type) {
         connections.push({ messageDefinition, md5sum, topic, type });
@@ -169,16 +189,17 @@ export default class BagDataProvider implements DataProvider {
     }
 
     const messageDefinitionsByTopic = {};
+    const messageDefinitionMd5SumByTopic = {};
     for (const connection of connections) {
       messageDefinitionsByTopic[connection.topic] = connection.messageDefinition;
+      messageDefinitionMd5SumByTopic[connection.topic] = connection.md5sum;
     }
 
     return {
       start: startTime,
       end: endTime,
       topics: bagConnectionsToTopics(connections, chunkInfos),
-      datatypes: bagConnectionsToDatatypes(connections),
-      messageDefinitionsByTopic,
+      messageDefinitions: { type: "raw", messageDefinitionsByTopic, messageDefinitionMd5SumByTopic },
       providesParsedMessages: false,
     };
   }
@@ -194,7 +215,7 @@ export default class BagDataProvider implements DataProvider {
   // Logs some stats if it has been more than a second since the last call.
   _debouncedLogStats = debounce(this._logStats, 1000, { leading: false, trailing: true });
 
-  _queueStats(stats: TimedPerformanceMetadata) {
+  _queueStats(stats: TimedDataThroughput) {
     if (this._lastPerformanceStatsToLog != null && statsAreAdjacent(this._lastPerformanceStatsToLog, stats)) {
       // The common case: The next bit of data will be next to the last one. For remote bags we'll
       // reuse the connection.
@@ -209,7 +230,8 @@ export default class BagDataProvider implements DataProvider {
     this._debouncedLogStats();
   }
 
-  async getMessages(start: Time, end: Time, topics: string[]): Promise<Message[]> {
+  async getMessages(start: Time, end: Time, subscriptions: GetMessagesTopics): Promise<GetMessagesResult> {
+    const topics = subscriptions.rosBinaryMessages || [];
     const connectionStart = fromMillis(new Date().getTime());
     let totalSizeOfMessages = 0;
     let numberOfMessages = 0;
@@ -225,7 +247,7 @@ export default class BagDataProvider implements DataProvider {
       numberOfMessages += 1;
     };
     const options = {
-      topics,
+      topics: topics.slice(), // copy because `topics` not readonly in rosbag
       startTime: start,
       endTime: end,
       noParse: true,
@@ -261,9 +283,7 @@ export default class BagDataProvider implements DataProvider {
       startTime: start,
       endTime: end,
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: this._options.bagPath.type === "file" ? "bag" : "remoteBag",
+        type: "average_throughput",
         totalSizeOfMessages,
         numberOfMessages,
         // Note: Requested durations are wrong by a nanosecond -- ranges are inclusive.
@@ -273,7 +293,7 @@ export default class BagDataProvider implements DataProvider {
         totalTransferTime: subtractTimes(fromMillis(new Date().getTime()), connectionStart),
       },
     });
-    return messages;
+    return { rosBinaryMessages: messages, parsedMessages: undefined, bobjects: undefined };
   }
 
   async close(): Promise<void> {}

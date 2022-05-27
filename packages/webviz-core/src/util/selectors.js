@@ -7,20 +7,20 @@
 //  You may not use this file except in compliance with the License.
 
 import { intersection, keyBy } from "lodash";
-import microMemoize from "micro-memoize";
+import memoizeWeak from "memoize-weak";
 import { createSelectorCreator, defaultMemoize, createSelector } from "reselect";
 import shallowequal from "shallowequal";
 
 import type { Topic } from "webviz-core/src/players/types";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
-import { SECOND_SOURCE_PREFIX } from "webviz-core/src/util/globalConstants";
+import { $WEBVIZ_SOURCE_2 } from "webviz-core/src/util/globalConstants";
 
 export const getTopicNames = createSelector<*, *, *, _>(
   (topics: Topic[]) => topics,
   (topics: Topic[]): string[] => topics.map((topic) => topic.name)
 );
 
-export const getSanitizedTopics = microMemoize(
+export const getSanitizedTopics = memoizeWeak(
   (subscribedTopics: Set<string>, providerTopics: Topic[]): string[] => {
     return intersection(Array.from(subscribedTopics), providerTopics.map(({ name }) => name));
   }
@@ -28,7 +28,7 @@ export const getSanitizedTopics = microMemoize(
 
 export function getTopicPrefixes(topics: string[]): string[] {
   // only support one prefix now, can add more such as `/webviz_bag_3` later
-  return topics.some((topic) => topic.startsWith(SECOND_SOURCE_PREFIX)) ? [SECOND_SOURCE_PREFIX] : [];
+  return topics.some((topic) => topic.startsWith($WEBVIZ_SOURCE_2)) ? [$WEBVIZ_SOURCE_2] : [];
 }
 
 export const getTopicsByTopicName = createSelector<*, *, *, _>(
@@ -69,10 +69,12 @@ export function extractTypeFromWebizEnumAnnotation(name: string) {
   return undefined;
 }
 
-// returns a map of the form {datatype -> {field -> {value -> name}}}
+// A map of the form {datatype -> {field -> {value -> name}}}
+export type EnumMap = { [string]: { [string]: { [mixed]: string } } };
+
 export const enumValuesByDatatypeAndField = createSelector<*, *, *, _>(
   (datatypes: RosDatatypes) => datatypes,
-  (datatypes: RosDatatypes): { [string]: { [string]: { [mixed]: string } } } => {
+  (datatypes: RosDatatypes): EnumMap => {
     const results = {};
     for (const datatype of Object.keys(datatypes)) {
       const currentResult = {};

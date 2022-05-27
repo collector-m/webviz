@@ -7,18 +7,21 @@
 //  You may not use this file except in compliance with the License.
 
 import React from "react";
+import type { Color } from "regl-worldview";
 
 import { type TopicSettingsEditorProps } from ".";
 import ColorPickerForTopicSettings from "./ColorPickerForTopicSettings";
 import { SLabel, SDescription } from "./common";
 import Checkbox from "webviz-core/src/components/Checkbox";
 import Flex from "webviz-core/src/components/Flex";
+import { IconTextTemplateEdit } from "webviz-core/src/panels/ThreeDimensionalViz/TopicSettingsEditor/IconMarkerSettingsEditor";
 import type { Marker, MarkerArray } from "webviz-core/src/types/Messages";
 import { LINED_CONVEX_HULL_RENDERING_SETTING } from "webviz-core/src/util/globalConstants";
 
 type MarkerSettings = {|
-  overrideColor?: ?string,
+  overrideColor?: ?Color,
   overrideCommand?: ?string,
+  iconTextTemplate?: ?string,
 |};
 
 export default function MarkerSettingsEditor(props: TopicSettingsEditorProps<Marker | MarkerArray, MarkerSettings>) {
@@ -49,6 +52,7 @@ export default function MarkerSettingsEditor(props: TopicSettingsEditorProps<Mar
         style={{ marginBottom: 12 }}
         labelStyle={{ lineHeight: 1.2 }}
       />
+      <IconTextTemplateEdit iconTextTemplate={settings.iconTextTemplate || ""} onFieldChange={onFieldChange} />
     </Flex>
   );
 }

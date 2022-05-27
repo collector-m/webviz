@@ -15,6 +15,7 @@ import sendNotification from "webviz-core/src/util/sendNotification";
 const dummyExtensionPoint = {
   progressCallback() {},
   reportMetadataCallback() {},
+  notifyPlayerManager: async () => {},
 };
 
 describe("BagDataProvider", () => {
@@ -37,18 +38,20 @@ describe("BagDataProvider", () => {
       { datatype: "geometry_msgs/Twist", name: "/turtle2/cmd_vel", numMessages: 208 },
       { datatype: "geometry_msgs/Twist", name: "/turtle1/cmd_vel", numMessages: 357 },
     ]);
-    expect(Object.keys(result.datatypes)).toContainOnly([
-      "rosgraph_msgs/Log",
-      "std_msgs/Header",
-      "turtlesim/Color",
-      "tf2_msgs/TFMessage",
-      "geometry_msgs/TransformStamped",
-      "geometry_msgs/Transform",
-      "geometry_msgs/Vector3",
-      "geometry_msgs/Quaternion",
-      "turtlesim/Pose",
-      "tf/tfMessage",
-      "geometry_msgs/Twist",
+    const { messageDefinitions } = result;
+    if (messageDefinitions.type !== "raw") {
+      throw new Error("BagDataProvider requires raw message definitions");
+    }
+    expect(Object.keys(messageDefinitions.messageDefinitionsByTopic)).toContainOnly([
+      "/rosout",
+      "/turtle1/color_sensor",
+      "/tf_static",
+      "/turtle2/color_sensor",
+      "/turtle1/pose",
+      "/turtle2/pose",
+      "/tf",
+      "/turtle2/cmd_vel",
+      "/turtle1/cmd_vel",
     ]);
   });
 
@@ -71,18 +74,20 @@ describe("BagDataProvider", () => {
       { datatype: "geometry_msgs/Twist", name: "/turtle2/cmd_vel", numMessages: 208 },
       { datatype: "geometry_msgs/Twist", name: "/turtle1/cmd_vel", numMessages: 357 },
     ]);
-    expect(Object.keys(result.datatypes)).toContainOnly([
-      "rosgraph_msgs/Log",
-      "std_msgs/Header",
-      "turtlesim/Color",
-      "tf2_msgs/TFMessage",
-      "geometry_msgs/TransformStamped",
-      "geometry_msgs/Transform",
-      "geometry_msgs/Vector3",
-      "geometry_msgs/Quaternion",
-      "turtlesim/Pose",
-      "tf/tfMessage",
-      "geometry_msgs/Twist",
+    const { messageDefinitions } = result;
+    if (messageDefinitions.type !== "raw") {
+      throw new Error("BagDataProvider requires raw message definitions");
+    }
+    expect(Object.keys(messageDefinitions.messageDefinitionsByTopic)).toContainOnly([
+      "/rosout",
+      "/turtle1/color_sensor",
+      "/tf_static",
+      "/turtle2/color_sensor",
+      "/turtle1/pose",
+      "/turtle2/pose",
+      "/tf",
+      "/turtle2/cmd_vel",
+      "/turtle1/cmd_vel",
     ]);
   });
 
@@ -94,21 +99,13 @@ describe("BagDataProvider", () => {
     await provider.initialize(dummyExtensionPoint);
     const start = { sec: 1396293887, nsec: 844783943 };
     const end = { sec: 1396293888, nsec: 60000000 };
-    const messages = await provider.getMessages(start, end, ["/tf"]);
-    expect(messages).toHaveLength(2);
-    expect(messages[0]).toEqual({
-      topic: "/tf",
-      receiveTime: {
-        sec: 1396293888,
-        nsec: 56251251,
-      },
-      message: expect.any(ArrayBuffer),
-    });
-    expect(messages[1]).toEqual({
-      topic: "/tf",
-      receiveTime: { nsec: 56262848, sec: 1396293888 },
-      message: expect.any(ArrayBuffer),
-    });
+    const messages = await provider.getMessages(start, end, { rosBinaryMessages: ["/tf"] });
+    expect(messages.bobjects).toBe(undefined);
+    expect(messages.parsedMessages).toBe(undefined);
+    expect(messages.rosBinaryMessages).toEqual([
+      { topic: "/tf", receiveTime: { sec: 1396293888, nsec: 56251251 }, message: expect.any(ArrayBuffer) },
+      { topic: "/tf", receiveTime: { nsec: 56262848, sec: 1396293888 }, message: expect.any(ArrayBuffer) },
+    ]);
   });
 
   it("sorts shuffled messages (and reports an error)", async () => {
@@ -119,8 +116,15 @@ describe("BagDataProvider", () => {
     await provider.initialize(dummyExtensionPoint);
     const start = { sec: 1490148912, nsec: 0 };
     const end = { sec: 1490148913, nsec: 0 };
-    const messages = await provider.getMessages(start, end, ["/tf"]);
-    const timestamps = messages.map(({ receiveTime }) => receiveTime);
+    const { bobjects, parsedMessages, rosBinaryMessages } = await provider.getMessages(start, end, {
+      rosBinaryMessages: ["/tf"],
+    });
+    expect(bobjects).toBe(undefined);
+    expect(parsedMessages).toBe(undefined);
+    if (rosBinaryMessages == null) {
+      throw new Error("Satisfy flow");
+    }
+    const timestamps = rosBinaryMessages.map(({ receiveTime }) => receiveTime);
     const sortedTimestamps = [...timestamps];
     sortedTimestamps.sort(TimeUtil.compare);
     expect(timestamps).toEqual(sortedTimestamps);
@@ -157,9 +161,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 10, nsec: 500 },
       endTime: { sec: 10, nsec: 599 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1"],
         totalSizeOfMessages: 10,
         numberOfMessages: 1,
@@ -172,9 +174,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 10, nsec: 600 },
       endTime: { sec: 10, nsec: 699 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1", "/topic2"],
         totalSizeOfMessages: 10,
         numberOfMessages: 1,
@@ -191,9 +191,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 10, nsec: 500 },
       endTime: { sec: 10, nsec: 599 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1"],
         totalSizeOfMessages: 10,
         numberOfMessages: 1,
@@ -206,9 +204,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 20, nsec: 600 },
       endTime: { sec: 20, nsec: 699 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1"],
         totalSizeOfMessages: 10,
         numberOfMessages: 1,
@@ -225,9 +221,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 10, nsec: 500 },
       endTime: { sec: 10, nsec: 599 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1"],
         totalSizeOfMessages: 10,
         numberOfMessages: 1,
@@ -240,9 +234,7 @@ describe("statsAreAdjacent", () => {
       startTime: { sec: 10, nsec: 600 },
       endTime: { sec: 10, nsec: 699 },
       data: {
-        type: "performance",
-        inputSource: "other",
-        inputType: "localBag",
+        type: "average_throughput",
         topics: ["/topic1"],
         totalSizeOfMessages: 12,
         numberOfMessages: 2,

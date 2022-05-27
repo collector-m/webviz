@@ -38,7 +38,32 @@ function glConstantToRegl(value: ?number): ?string {
   throw new Error(`unhandled constant value ${JSON.stringify(value)}`);
 }
 
+// Default sampler set based on GLTF recommendations:
+// https://github.com/KhronosGroup/glTF/blob/master/specification/2.0/README.md#texture
+const getDefaultSampler = () => ({
+  minFilter: WebGLRenderingContext.NEAREST_MIPMAP_LINEAR,
+  magFilter: WebGLRenderingContext.LINEAR,
+  wrapS: WebGLRenderingContext.REPEAT,
+  wrapT: WebGLRenderingContext.REPEAT,
+});
+
+const getSceneToDraw = ({ json }) => {
+  if (json.scene != null) {
+    return json.scene;
+  }
+  // Draw the first scene if the scene key is missing.
+  const keys = Object.keys(json.scenes ?? {});
+  if (keys.length === 0) {
+    throw new Error("No scenes to render");
+  }
+  return keys[0];
+};
+
 const drawModel = (regl) => {
+  if (!regl) {
+    throw new Error("Invalid regl instance");
+  }
+
   const command = regl({
     primitive: "triangles",
     blend: defaultBlend,
@@ -120,7 +145,7 @@ const drawModel = (regl) => {
     const textures =
       model.json.textures &&
       model.json.textures.map((textureInfo) => {
-        const sampler = model.json.samplers[textureInfo.sampler];
+        const sampler = textureInfo.sampler ? model.json.samplers[textureInfo.sampler] : getDefaultSampler();
         const bitmap = model.images && model.images[textureInfo.source];
         const texture = regl.texture({
           data: bitmap,
@@ -141,15 +166,25 @@ const drawModel = (regl) => {
       for (const primitive of mesh.primitives) {
         const material = model.json.materials[primitive.material];
         const texInfo = material.pbrMetallicRoughness.baseColorTexture;
-        if (!accessors) {
+
+        let primitiveAccessors = accessors;
+        const { extensions = {} } = primitive;
+        const dracoCompressionEXT = extensions.KHR_draco_mesh_compression;
+        if (dracoCompressionEXT) {
+          // If mesh contains compressed data, accessors will be available inside
+          // the draco extension. See `parseGLB.js` and `draco.js` files.
+          primitiveAccessors = dracoCompressionEXT.accessors;
+        }
+        if (!primitiveAccessors) {
           throw new Error("Error decoding GLB model: Missing `accessors` in JSON data");
         }
+
         drawCalls.push({
-          indices: accessors[primitive.indices],
-          positions: accessors[primitive.attributes.POSITION],
-          normals: accessors[primitive.attributes.NORMAL],
+          indices: primitiveAccessors[primitive.indices],
+          positions: primitiveAccessors[primitive.attributes.POSITION],
+          normals: primitiveAccessors[primitive.attributes.NORMAL],
           texCoords: texInfo
-            ? accessors[primitive.attributes[`TEXCOORD_${texInfo.texCoord || 0}`]]
+            ? primitiveAccessors[primitive.attributes[`TEXCOORD_${texInfo.texCoord || 0}`]]
             : { divisor: 1, buffer: singleTexCoord },
           baseColorTexture: texInfo ? textures[texInfo.index] : whiteTexture,
           baseColorFactor: material.pbrMetallicRoughness.baseColorFactor || [1, 1, 1, 1],
@@ -179,8 +214,9 @@ const drawModel = (regl) => {
       }
     }
 
-    // finally, draw each of the main scene's nodes
-    for (const nodeIdx of model.json.scenes[model.json.scene].nodes) {
+    // finally, draw each of the main scene's nodes. Use the first scene if one isn't specified
+    // explicitly.
+    for (const nodeIdx of model.json.scenes[getSceneToDraw(model)].nodes) {
       const rootTransform = mat4.create();
       mat4.rotateX(rootTransform, rootTransform, Math.PI / 2);
       mat4.rotateY(rootTransform, rootTransform, Math.PI / 2);
@@ -249,24 +285,21 @@ function useAsyncValue<T>(fn: () => Promise<T>, deps: ?(any[])): ?T {
 
 function useModel(model: string | (() => Promise<GLBModel>)): ?GLBModel {
   useDebugValue(model);
-  return useAsyncValue(
-    async () => {
-      if (typeof model === "function") {
-        return model();
+  return useAsyncValue(async () => {
+    if (typeof model === "function") {
+      return model();
+    }
+    if (typeof model === "string") {
+      const response = await fetch(model);
+      if (!response.ok) {
+        throw new Error(`failed to fetch GLTF model: ${response.status}`);
       }
-      if (typeof model === "string") {
-        const response = await fetch(model);
-        if (!response.ok) {
-          throw new Error(`failed to fetch GLTF model: ${response.status}`);
-        }
-        return parseGLB(await response.arrayBuffer());
-      }
+      return parseGLB(await response.arrayBuffer());
+    }
 
-      /*:: (model: empty) */
-      throw new Error(`unsupported model prop: ${typeof model}`);
-    },
-    [model]
-  );
+    /*:: (model: empty) */
+    throw new Error(`unsupported model prop: ${typeof model}`);
+  }, [model]);
 }
 
 export default function GLTFScene(props: Props) {
@@ -274,14 +307,11 @@ export default function GLTFScene(props: Props) {
 
   const context = useContext(WorldviewReactContext);
   const loadedModel = useModel(model);
-  useEffect(
-    () => {
-      if (context) {
-        context.onDirty();
-      }
-    },
-    [context, loadedModel]
-  );
+  useEffect(() => {
+    if (context) {
+      context.onDirty();
+    }
+  }, [context, loadedModel]);
 
   if (!loadedModel) {
     return null;

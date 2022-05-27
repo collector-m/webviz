@@ -9,7 +9,6 @@
 import memoize from "lodash/memoize";
 
 import { getGlobalHooks } from "./loadWebviz";
-import { DIAGNOSTIC_TOPIC } from "./util/globalConstants";
 
 /*
 We've split this code out seperately from the rest of the hooks so that we can lazy load these components by
@@ -17,10 +16,12 @@ lazily importing this file at runtime.
 */
 
 export function panelsByCategory() {
+  const Audio = require("webviz-core/src/panels/Audio").default;
   const DiagnosticStatusPanel = require("webviz-core/src/panels/diagnostics/DiagnosticStatusPanel").default;
   const DiagnosticSummary = require("webviz-core/src/panels/diagnostics/DiagnosticSummary").default;
   const GlobalVariables = require("webviz-core/src/panels/GlobalVariables").default;
   const GlobalVariableSlider = require("webviz-core/src/panels/GlobalVariableSlider").default;
+  const GlobalVariableDropdown = require("webviz-core/src/panels/GlobalVariableDropdown").default;
   const ImageViewPanel = require("webviz-core/src/panels/ImageView").default;
   const Internals = require("webviz-core/src/panels/Internals").default;
   const NodePlayground = require("webviz-core/src/panels/NodePlayground").default;
@@ -38,10 +39,12 @@ export function panelsByCategory() {
   const TwoDimensionalPlot = require("webviz-core/src/panels/TwoDimensionalPlot").default;
   const ThreeDimensionalViz = require("webviz-core/src/panels/ThreeDimensionalViz").default;
   const { ndash } = require("webviz-core/src/util/entities");
+  const Table = require("webviz-core/src/panels/Table").default;
 
   const ros = [
     { title: "2D Plot", component: TwoDimensionalPlot },
     { title: "3D", component: ThreeDimensionalViz },
+    { title: "Audio", component: Audio },
     { title: `Diagnostics ${ndash} Summary`, component: DiagnosticSummary },
     { title: `Diagnostics ${ndash} Detail`, component: DiagnosticStatusPanel },
     { title: "Image", component: ImageViewPanel },
@@ -50,11 +53,13 @@ export function panelsByCategory() {
     { title: "Raw Messages", component: RawMessages },
     { title: "rosout", component: Rosout },
     { title: "State Transitions", component: StateTransitions },
+    { title: "Table", component: Table },
   ];
 
   const utilities = [
     { title: "Global Variables", component: GlobalVariables },
     { title: "Global Variable Slider", component: GlobalVariableSlider },
+    { title: "Global Variable Dropdown", component: GlobalVariableDropdown },
     { title: "Node Playground", component: NodePlayground },
     { title: "Notes", component: Note },
     { title: "Tab", component: Tab },
@@ -74,39 +79,59 @@ export function panelsByCategory() {
 export function perPanelHooks() {
   const BlurIcon = require("@mdi/svg/svg/blur.svg").default;
   const GridIcon = require("@mdi/svg/svg/grid.svg").default;
+  const ChartIcon = require("@mdi/svg/svg/chart-line-variant.svg").default;
   const HexagonIcon = require("@mdi/svg/svg/hexagon.svg").default;
   const HexagonMultipleIcon = require("@mdi/svg/svg/hexagon-multiple.svg").default;
   const PentagonOutlineIcon = require("@mdi/svg/svg/pentagon-outline.svg").default;
   const RadarIcon = require("@mdi/svg/svg/radar.svg").default;
   const RobotIcon = require("@mdi/svg/svg/robot.svg").default;
-  const LaserScanVert = require("webviz-core/src/panels/ThreeDimensionalViz/LaserScanVert").default;
-  const { defaultMapPalette } = require("webviz-core/src/panels/ThreeDimensionalViz/commands/utils");
   const {
-    POINT_CLOUD_DATATYPE,
-    POSE_STAMPED_DATATYPE,
-    TF_DATATYPE,
-    WEBVIZ_MARKER_DATATYPE,
+    GEOMETRY_MSGS$POLYGON_STAMPED,
+    NAV_MSGS$OCCUPANCY_GRID,
+    NAV_MSGS$PATH,
+    SENSOR_MSGS$POINT_CLOUD_2,
+    GEOMETRY_MSGS$POSE_STAMPED,
+    SENSOR_MSGS$LASER_SCAN,
+    TF2_MSGS$TF_MESSAGE,
+    VISUALIZATION_MSGS$MARKER,
+    VISUALIZATION_MSGS$MARKER_ARRAY,
+    VISUALIZATION_MSGS$WEBVIZ_MARKER,
+    VISUALIZATION_MSGS$WEBVIZ_MARKER_ARRAY,
+    WEBVIZ_ICON_MSGS$WEBVIZ_3D_ICON_ARRAY,
+    $DIAGNOSTICS,
+    RADAR_POINT_CLOUD,
+    WRAPPED_POINT_CLOUD,
   } = require("webviz-core/src/util/globalConstants");
+
+  const sceneBuilderHooks = require("webviz-core/src/panels/ThreeDimensionalViz/SceneBuilder/defaultHooks").default;
+  const supportsOffscreenCanvas = require("webviz-core/src/util/supportsOffscreenCanvas").default;
+  const initLayoutNonWorker = require("webviz-core/src/panels/ThreeDimensionalViz/Layout/LayoutWorker").default;
+  const useStaticTransformsData = require("webviz-core/src/panels/ThreeDimensionalViz/Transforms/useStaticTransformsData")
+    .default;
 
   const SUPPORTED_MARKER_DATATYPES = {
     // generally supported datatypes
-    VISUALIZATION_MSGS_MARKER_DATATYPE: "visualization_msgs/Marker",
-    VISUALIZATION_MSGS_MARKER_ARRAY_DATATYPE: "visualization_msgs/MarkerArray",
-    WEBVIZ_MARKER_DATATYPE,
-    POSE_STAMPED_DATATYPE,
-    POINT_CLOUD_DATATYPE,
-    SENSOR_MSGS_LASER_SCAN_DATATYPE: "sensor_msgs/LaserScan",
-    NAV_MSGS_OCCUPANCY_GRID_DATATYPE: "nav_msgs/OccupancyGrid",
-    GEOMETRY_MSGS_POLYGON_STAMPED_DATATYPE: "geometry_msgs/PolygonStamped",
-    TF_DATATYPE,
+    VISUALIZATION_MSGS$MARKER,
+    VISUALIZATION_MSGS$MARKER_ARRAY,
+    VISUALIZATION_MSGS$WEBVIZ_MARKER,
+    VISUALIZATION_MSGS$WEBVIZ_MARKER_ARRAY,
+    WEBVIZ_ICON_MSGS$WEBVIZ_3D_ICON_ARRAY,
+    GEOMETRY_MSGS$POSE_STAMPED,
+    SENSOR_MSGS$POINT_CLOUD_2,
+    SENSOR_MSGS$LASER_SCAN,
+    NAV_MSGS$PATH,
+    NAV_MSGS$OCCUPANCY_GRID,
+    GEOMETRY_MSGS$POLYGON_STAMPED,
+    TF2_MSGS$TF_MESSAGE,
   };
 
   return {
+    Audio: { defaultTopic: null },
     DiagnosticSummary: {
       defaultConfig: {
         pinnedIds: [],
         hardwareIdFilter: "",
-        topicToRender: DIAGNOSTIC_TOPIC,
+        topicToRender: $DIAGNOSTICS,
       },
     },
     ImageView: {
@@ -121,7 +146,7 @@ export function perPanelHooks() {
         zoomPercentage: 100,
         offset: [0, 0],
       },
-      imageMarkerDatatypes: ["visualization_msgs/ImageMarker"],
+      imageMarkerDatatypes: ["visualization_msgs/ImageMarker", "webviz_msgs/ImageMarkerArray"],
       canTransformMarkersByTopic: (topic) => !topic.includes("rect"),
     },
     GlobalVariableSlider: {
@@ -138,73 +163,52 @@ export function perPanelHooks() {
         pinTopics: false,
         settingsByKey: {},
         autoSyncCameraState: false,
+        autoTextBackgroundColor: true,
       },
+      topicSettingsEditors: {},
       SUPPORTED_MARKER_DATATYPES,
       BLACKLIST_TOPICS: [],
-      allSupportedMarkers: [
-        "arrow",
-        "cube",
-        "cubeList",
-        "cylinder",
-        "filledPolygon",
-        "grid",
-        "instancedLineList",
-        "laserScan",
-        "linedConvexHull",
-        "lineList",
-        "lineStrip",
-        "pointcloud",
-        "points",
-        "poseMarker",
-        "sphere",
-        "sphereList",
-        "text",
-        "triangleList",
-      ],
-      renderAdditionalMarkers: () => {},
-      topics: [],
+      additionalSubscriptions: [],
       iconsByDatatype: {
-        "visualization_msgs/Marker": HexagonIcon,
-        "visualization_msgs/MarkerArray": HexagonMultipleIcon,
-        "nav_msgs/OccupancyGrid": GridIcon,
-        "sensor_msgs/LaserScan": RadarIcon,
-        "geometry_msgs/PolygonStamped": PentagonOutlineIcon,
-        [POINT_CLOUD_DATATYPE]: BlurIcon,
-        [POSE_STAMPED_DATATYPE]: RobotIcon,
-        [WEBVIZ_MARKER_DATATYPE]: HexagonIcon,
+        // Named datatypes
+        [VISUALIZATION_MSGS$MARKER]: HexagonIcon,
+        [VISUALIZATION_MSGS$MARKER_ARRAY]: HexagonMultipleIcon,
+        [NAV_MSGS$OCCUPANCY_GRID]: GridIcon,
+        [NAV_MSGS$PATH]: ChartIcon,
+        [SENSOR_MSGS$LASER_SCAN]: RadarIcon,
+        [GEOMETRY_MSGS$POLYGON_STAMPED]: PentagonOutlineIcon,
+        [SENSOR_MSGS$POINT_CLOUD_2]: BlurIcon,
+        [GEOMETRY_MSGS$POSE_STAMPED]: RobotIcon,
+        [VISUALIZATION_MSGS$WEBVIZ_MARKER]: HexagonIcon,
+        [VISUALIZATION_MSGS$WEBVIZ_MARKER_ARRAY]: HexagonMultipleIcon,
+        // Structural datatypes
+        [RADAR_POINT_CLOUD]: BlurIcon,
+        [WRAPPED_POINT_CLOUD]: BlurIcon,
       },
       // TODO(Audrey): remove icons config after topic group release
       icons: {},
       AdditionalToolbarItems: () => null,
-      LaserScanVert,
-      getSelectionState: () => {},
-      getTopicsToRender: () => new Set(),
-      consumeMessage: (topic, datatype, msg, consumeMethods, { errors }) => {
-        // TF messages are consumed by TransformBuilder, not SceneBuilder.
-        if (datatype === SUPPORTED_MARKER_DATATYPES.TF_DATATYPE) {
-          return;
+      // TODO(useWorkerIn3DPanel): Remove sceneBuilderHooks when flag is deleted.
+      sceneBuilderHooks,
+      useWorldContextValue: require("webviz-core/src/panels/ThreeDimensionalViz/SceneBuilder/useWorldContextValue")
+        .default,
+      getLayoutWorker: () => {
+        if (supportsOffscreenCanvas()) {
+          const WorkerType = require("webviz-core/src/panels/ThreeDimensionalViz/Layout/Layout.worker");
+          return new WorkerType();
         }
-        errors.topicsWithError.set(topic, `Unrecognized topic datatype for scene: ${datatype}`);
+        return initLayoutNonWorker(sceneBuilderHooks);
       },
-      getMessagePose: (msg) => msg.message.pose,
-      addMarkerToCollector: () => false,
-      getSyntheticArrowMarkerColor: () => ({ r: 0, g: 0, b: 1, a: 0.5 }),
-      getFlattenedPose: () => undefined,
-      getOccupancyGridValues: (_topic) => [0.5, "map"],
-      getMapPalette() {
-        return defaultMapPalette;
-      },
-      consumePose: () => {},
-      getMarkerColor: (topic, markerColor) => markerColor,
+      // Duplicated in sceneBuilderHooks
+      skipTransformFrame: null,
+      useDynamicTransformsData: () => null,
+      useStaticTransformsData,
+
       ungroupedNodesCategory: "Topics",
       rootTransformFrame: "map",
       defaultFollowTransformFrame: null,
-      skipTransformFrame: null,
     },
     RawMessages: { docLinkFunction: (filename) => `https://www.google.com/search?q=${filename}` },
-    installChartJs: () => {
-      require("webviz-core/src/util/installChartjs").default();
-    },
   };
 }
 

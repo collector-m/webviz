@@ -7,6 +7,7 @@
 //  You may not use this file except in compliance with the License.
 
 import round from "lodash/round";
+import sortBy from "lodash/sortBy";
 import sum from "lodash/sum";
 
 import Database from "webviz-core/src/util/indexeddb/Database";
@@ -41,6 +42,7 @@ export type PerformanceStats = {|
   preloadTimeMs: ?number,
   averageRenderMs: number,
   averageFrameTimeMs: number,
+  frameTimePercentiles: {| percentile: number, frameTimeMs: number |}[],
   idb: IdbInfo,
 |};
 
@@ -61,6 +63,9 @@ if (isNaN(msPerFrame)) {
   throw new Error(`Invalid param ${PERFORMANCE_MEASURING_MS_FRAMERATE_PARAM}`);
 }
 
+// Define average([]) as 0.
+const average = (numbers: number[]) => sum(numbers) / (numbers.length || 1);
+
 // Marks are expensive: only enable marking performance when we can plausibly see and use the markings, IE in local
 // development builds when we aren't doing benchmarking.
 const enablePerformanceMarks = process.env.NODE_ENV === "development";
@@ -75,6 +80,8 @@ class PerformanceMeasuringClient {
 
   startTime: ?number;
   startedMeasuringPerformance = false;
+  rangeStartTime = undefined;
+  rangeEndTime = undefined;
   frameRenderStart: ?number;
   frameRenderTimes: number[] = [];
   preloadStart: ?number;
@@ -114,8 +121,10 @@ class PerformanceMeasuringClient {
       performance.mark("FRAME_RENDER_END");
       performance.measure("FRAME_RENDER", "FRAME_RENDER_START", "FRAME_RENDER_END");
     }
-    this.frameRenderTimes.push(round(performance.now() - frameRenderStart));
+    const frameTimeMs = performance.now() - frameRenderStart;
+    this.frameRenderTimes.push(round(frameTimeMs));
     this.frameRenderStart = null;
+    return frameTimeMs;
   }
 
   markPreloadStart() {
@@ -134,8 +143,10 @@ class PerformanceMeasuringClient {
       performance.mark("PRELOAD_END");
       performance.measure("PRELOAD", "PRELOAD_START", "PRELOAD_END");
     }
+    const preloadTimeMs = performance.now() - preloadStart;
     this.preloadTimeMs = round(performance.now() - preloadStart);
     this.preloadStart = null;
+    return preloadTimeMs;
   }
 
   markTotalFrameStart() {
@@ -192,14 +203,23 @@ class PerformanceMeasuringClient {
 
     const playbackTimeMs = round(performance.now() - startTime);
     const benchmarkPlaybackScore = round(bagLengthMs / (playbackTimeMs * this.speed), 3);
-    const averageRenderMs = round(
-      this.frameRenderTimes.length ? sum(this.frameRenderTimes) / this.frameRenderTimes.length : 0,
-      2
-    );
-    const averageFrameTimeMs = round(
-      this.totalFrameTimes.length ? sum(this.totalFrameTimes) / this.totalFrameTimes.length : 0,
-      2
-    );
+    const averageRenderMs = round(average(this.frameRenderTimes), 2);
+    const averageFrameTimeMs = round(average(this.totalFrameTimes));
+
+    const sortedFrameLengths = sortBy(this.totalFrameTimes);
+    const getPercentile = (percentile: number): number => {
+      if (sortedFrameLengths.length === 0) {
+        return 0;
+      }
+      // The 100th percentile (i.e. max) frame time is at index (length - 1).
+      const index = Math.round((percentile / 100) * (sortedFrameLengths.length - 1));
+      return sortedFrameLengths[index];
+    };
+    const frameTimePercentiles = [50, 90, 95, 99, 100].map((percentile) => ({
+      percentile,
+      frameTimeMs: getPercentile(percentile),
+    }));
+
     const frameRenderCount = this.frameRenderTimes.length;
     const idb = await this._collectIdbStats();
     const detail: PerformanceStats = {
@@ -211,6 +231,7 @@ class PerformanceMeasuringClient {
       playbackTimeMs,
       averageRenderMs,
       averageFrameTimeMs,
+      frameTimePercentiles,
       idb,
       preloadTimeMs,
     };

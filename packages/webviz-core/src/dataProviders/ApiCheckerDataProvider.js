@@ -8,13 +8,14 @@
 
 import { TimeUtil, type Time } from "rosbag";
 
-import { CoreDataProviders } from "webviz-core/src/dataProviders/constants";
+import { CoreDataProviders, MESSAGE_FORMATS } from "webviz-core/src/dataProviders/constants";
 import type {
   DataProvider,
   DataProviderDescriptor,
   ExtensionPoint,
   GetDataProvider,
-  GetMessagesExtra,
+  GetMessagesResult,
+  GetMessagesTopics,
   InitializationResult,
 } from "webviz-core/src/dataProviders/types";
 import type { Message } from "webviz-core/src/players/types";
@@ -40,7 +41,7 @@ export function instrumentTreeWithApiCheckerDataProvider(
 ): DataProviderDescriptor {
   return {
     name: CoreDataProviders.ApiCheckerDataProvider,
-    args: { name: `${treeRoot.name}@${depth}` },
+    args: { name: `${treeRoot.name}@${depth}`, isRoot: depth === 0 },
     children: [
       {
         ...treeRoot,
@@ -56,9 +57,15 @@ export default class ApiCheckerDataProvider implements DataProvider {
   _initializationResult: ?InitializationResult;
   _topicNames: string[] = [];
   _closed: boolean = false;
+  _isRoot: boolean;
 
-  constructor(args: { name: string }, children: DataProviderDescriptor[], getDataProvider: GetDataProvider) {
+  constructor(
+    args: { name: string, isRoot: boolean },
+    children: DataProviderDescriptor[],
+    getDataProvider: GetDataProvider
+  ) {
     this._name = args.name;
+    this._isRoot = args.isRoot;
     if (children.length !== 1) {
       this._warn(`Required exactly 1 child, but received ${children.length}`);
       return;
@@ -76,24 +83,45 @@ export default class ApiCheckerDataProvider implements DataProvider {
     if (initializationResult.topics.length === 0) {
       this._warn("No topics returned at all; should have thrown error instead (with details of why this is happening)");
     }
+    if (this._isRoot && initializationResult.messageDefinitions.type !== "parsed") {
+      this._warn(`Root data provider should return parsed message definitions but instead returned raw`);
+    }
     for (const topic of initializationResult.topics) {
       this._topicNames.push(topic.name);
-      if (!initializationResult.datatypes[topic.datatype]) {
-        this._warn(`Topic "${topic.name}" datatype "${topic.datatype}" not present in datatypes`);
-      }
-      if (!initializationResult.providesParsedMessages && !initializationResult.messageDefinitionsByTopic[topic.name]) {
-        this._warn(`Topic "${topic.name}"" not present in messageDefinitionsByTopic`);
+      if (initializationResult.messageDefinitions.type === "raw") {
+        if (
+          !initializationResult.providesParsedMessages &&
+          !initializationResult.messageDefinitions.messageDefinitionsByTopic[topic.name]
+        ) {
+          this._warn(`Topic "${topic.name}"" not present in messageDefinitionsByTopic`);
+        }
+      } else {
+        if (
+          !initializationResult.providesParsedMessages &&
+          !initializationResult.messageDefinitions.parsedMessageDefinitionsByTopic[topic.name]
+        ) {
+          this._warn(`Topic "${topic.name}"" not present in parsedMessageDefinitionsByTopic`);
+        }
+        if (!initializationResult.messageDefinitions.datatypes[topic.datatype]) {
+          this._warn(`Topic "${topic.name}" datatype "${topic.datatype}" not present in datatypes`);
+        }
       }
     }
-    return this._initializationResult;
+    return initializationResult;
   }
 
-  async getMessages(start: Time, end: Time, topics: string[], extra?: ?GetMessagesExtra): Promise<Message[]> {
+  async getMessages(start: Time, end: Time, subscriptions: GetMessagesTopics): Promise<GetMessagesResult> {
+    if (!Number.isInteger(start.sec) || !Number.isInteger(start.nsec)) {
+      this._warn(`start time ${JSON.stringify(start)} must only contain integers`);
+    }
+    if (!Number.isInteger(end.sec) || !Number.isInteger(end.nsec)) {
+      this._warn(`end time ${JSON.stringify(end)} must only contain integers`);
+    }
     const initRes = this._initializationResult;
     if (!initRes) {
       this._warn("getMessages was called before initialize finished");
       // Need to return, otherwise we can't refer to initRes later, and this is a really bad violation anyway.
-      return [];
+      return { bobjects: undefined, parsedMessages: undefined, rosBinaryMessages: undefined };
     }
     if (TimeUtil.isLessThan(end, start)) {
       this._warn(`getMessages end (${formatTimeRaw(end)}) is before getMessages start (${formatTimeRaw(start)})`);
@@ -106,43 +134,59 @@ export default class ApiCheckerDataProvider implements DataProvider {
     if (TimeUtil.isLessThan(initRes.end, end)) {
       this._warn(`getMessages end (${formatTimeRaw(end)}) is after global end (${formatTimeRaw(initRes.end)})`);
     }
-    if (topics.length === 0) {
+    if (
+      !subscriptions.bobjects?.length &&
+      !subscriptions.parsedMessages?.length &&
+      !subscriptions.rosBinaryMessages?.length
+    ) {
       this._warn("getMessages was called without any topics");
     }
-    for (const topic of topics) {
-      if (!this._topicNames.includes(topic)) {
-        this._warn(
-          `Requested topic (${topic}) is not in the list of topics published by "initialize" (${JSON.stringify(
-            this._topicNames
-          )})`
-        );
+    for (const messageType of MESSAGE_FORMATS) {
+      for (const topic of subscriptions[messageType] || []) {
+        if (!this._topicNames.includes(topic)) {
+          this._warn(
+            `Requested topic (${topic}) is not in the list of topics published by "initialize" (${JSON.stringify(
+              this._topicNames
+            )})`
+          );
+        }
       }
     }
 
-    const messages = await this._provider.getMessages(start, end, topics, extra);
-    let lastTime: ?Time;
-    for (const message: Message of messages) {
-      if (!topics.includes(message.topic)) {
-        this._warn(`message.topic (${message.topic}) was never requested (${JSON.stringify(topics)})`);
+    const providerResult = await this._provider.getMessages(start, end, subscriptions);
+
+    for (const messageType of MESSAGE_FORMATS) {
+      const messages = providerResult[messageType];
+      if (messages == null) {
+        continue;
       }
-      if (TimeUtil.isLessThan(message.receiveTime, start)) {
-        this._warn(
-          `message.receiveTime (${formatTimeRaw(message.receiveTime)}) is before start (${formatTimeRaw(start)})`
-        );
+      const topics = subscriptions[messageType] || [];
+      let lastTime: ?Time;
+      for (const message: Message of messages) {
+        if (!topics.includes(message.topic)) {
+          this._warn(`message.topic (${message.topic}) was never requested (${JSON.stringify(topics)})`);
+        }
+        if (TimeUtil.isLessThan(message.receiveTime, start)) {
+          this._warn(
+            `message.receiveTime (${formatTimeRaw(message.receiveTime)}) is before start (${formatTimeRaw(start)})`
+          );
+        }
+        if (TimeUtil.isLessThan(end, message.receiveTime)) {
+          this._warn(
+            `message.receiveTime (${formatTimeRaw(message.receiveTime)}) is after end (${formatTimeRaw(end)})`
+          );
+        }
+        if (lastTime && TimeUtil.isLessThan(message.receiveTime, lastTime)) {
+          this._warn(
+            `message.receiveTime (${formatTimeRaw(
+              message.receiveTime
+            )}) is before previous message receiveTime (${formatTimeRaw(lastTime)}) -- messages are not sorted by time`
+          );
+        }
+        lastTime = message.receiveTime;
       }
-      if (TimeUtil.isLessThan(end, message.receiveTime)) {
-        this._warn(`message.receiveTime (${formatTimeRaw(message.receiveTime)}) is after end (${formatTimeRaw(end)})`);
-      }
-      if (lastTime && TimeUtil.isLessThan(message.receiveTime, lastTime)) {
-        this._warn(
-          `message.receiveTime (${formatTimeRaw(
-            message.receiveTime
-          )}) is before previous message receiveTime (${formatTimeRaw(lastTime)}) -- messages are not sorted by time`
-        );
-      }
-      lastTime = message.receiveTime;
     }
-    return messages;
+    return providerResult;
   }
 
   async close(): Promise<void> {

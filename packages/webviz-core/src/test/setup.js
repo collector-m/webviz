@@ -7,6 +7,8 @@
 //  You may not use this file except in compliance with the License.
 
 import "babel-polyfill";
+// Node has a TextDecoder in util, but it doesn't support the ascii encoding used in binary message
+// rewriting.
 import { TextDecoder } from "text-encoding";
 import UrlSearchParams from "url-search-params";
 import util from "util";
@@ -67,11 +69,17 @@ global.IDBKeyRange = require("fake-indexeddb/lib/FDBKeyRange");
 // monkey-patch global websocket
 global.WebSocket = global.WebSocket || ws;
 
-// Patch in a node implementation of the crypto API.
-global.crypto = require("@trust/webcrypto");
-
 // $FlowFixMe - Flow does not recognize that `TextEncoder` has been in the util module since v8.3.0.
 global.TextEncoder = util.TextEncoder;
 
+if (global.FinalizationRegistry == null) {
+  global.FinalizationRegistry = class {
+    register() {}
+  };
+}
+
 // Override lazy load components
 require("../hooksImporter").testSetup();
+
+// Set logEvent up with a default implementation
+require("webviz-core/src/util/logEvent").resetLogEventForTests();

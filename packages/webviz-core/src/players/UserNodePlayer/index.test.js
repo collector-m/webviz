@@ -6,40 +6,22 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import { isPlainObject } from "lodash";
-
 import signal from "webviz-core/shared/signal";
-import { type SetUserNodeTrust } from "webviz-core/src/actions/userNodes";
 import FakePlayer from "webviz-core/src/components/MessagePipeline/FakePlayer";
-import NodePlayer from "webviz-core/src/players/NodePlayer";
+import type { SubscribePayload, Message, BobjectMessage } from "webviz-core/src/players/types";
 import UserNodePlayer from "webviz-core/src/players/UserNodePlayer";
-import { registerNode, processMessage } from "webviz-core/src/players/UserNodePlayer/nodeRuntimeWorker/registry";
-import { trustUserNode } from "webviz-core/src/players/UserNodePlayer/nodeSecurity";
 import exampleDatatypes from "webviz-core/src/players/UserNodePlayer/nodeTransformerWorker/fixtures/example-datatypes.json";
-import transform from "webviz-core/src/players/UserNodePlayer/nodeTransformerWorker/transformer";
-import generateRosLib from "webviz-core/src/players/UserNodePlayer/nodeTransformerWorker/typegen";
 import { Sources, DiagnosticSeverity, ErrorCodes } from "webviz-core/src/players/UserNodePlayer/types";
-import { DEFAULT_WEBVIZ_NODE_PREFIX } from "webviz-core/src/util/globalConstants";
-import Rpc from "webviz-core/src/util/Rpc";
+import MockUserNodePlayerWorker from "webviz-core/src/players/UserNodePlayer/worker.mock";
+import { wrapMessages } from "webviz-core/src/test/datatypes";
+import { deepParse } from "webviz-core/src/util/binaryObjects";
+import { getSourceData } from "webviz-core/src/util/binaryObjects/messageDefinitionUtils";
+import { basicDatatypes } from "webviz-core/src/util/datatypes";
+import { DEFAULT_WEBVIZ_NODE_PREFIX, $WEBVIZ_SOURCE_2 } from "webviz-core/src/util/globalConstants";
+import Storage from "webviz-core/src/util/Storage";
 
+const storage = new Storage();
 const nodeId = "nodeId";
-
-const hardcodedNode = {
-  inputs: ["/input/foo", "/input/bar"],
-  output: { name: "/webviz/test", datatype: "test" },
-  datatypes: { test: { fields: [{ type: "string", name: "foo" }] } },
-  defaultState: {},
-  callback: ({ message, state }) => ({
-    messages: [
-      {
-        topic: "/webviz/test",
-        receiveTime: message.receiveTime,
-        message: message.message,
-      },
-    ],
-    state,
-  }),
-};
 
 const nodeUserCode = `
   export const inputs = ["/np_input"];
@@ -61,51 +43,96 @@ const nodeUserCodeWithPointClouds = `
   };
 `;
 
-jest.mock("webviz-core/src/util/Rpc", () =>
-  jest.fn().mockImplementation(() => ({
-    send: jest.fn(),
-    receive: jest.fn(),
-  }))
-);
+const nodeUserCodeWithGlobalVars = `
+  export const inputs = ["/np_input"];
+  export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
+  let lastStamp, lastReceiveTime;
+  type GlobalVariables = { globalValue: string };
+  export default (message: { message: { payload: string } }, globalVars: GlobalVariables): { custom_np_field: string, value: string } => {
+    return { custom_np_field: globalVars.globalValue, value: globalVars.globalValue };
+  };
+`;
 
-const validateWorkerArgs = (arg: any) => {
-  expect(arg).not.toBeInstanceOf(Function);
-
-  if (isPlainObject(arg)) {
-    Object.values(arg).forEach((val) => {
-      validateWorkerArgs(val);
-    });
-  } else if (Array.isArray(arg)) {
-    arg.forEach(validateWorkerArgs);
-  }
-};
+const nodeUserCodeWithLogAndError = `
+  export const inputs = ["/np_input"];
+  export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
+  export default (message: { message: { payload: string } }): { success: boolean } => {
+    if (message.message.payload === "bar") {
+      log('Running. Will fail.');
+      throw new Error("Error!");
+    }
+    log('Running. Will succeed.');
+    return { success: true };
+  };
+`;
 
 const defaultUserNodeActions = {
   setUserNodeDiagnostics: jest.fn(),
   addUserNodeLogs: jest.fn(),
-  setUserNodeTrust: jest.fn(),
   setUserNodeRosLib: jest.fn(),
 };
 
-describe("UserNodePlayer", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    // Simply wires the RpcProvider interface into the user node registry.
-    // $FlowFixMe - mocks are hard with flow
-    Rpc.mockImplementation(() => ({
-      send: (rpc, args) => {
-        validateWorkerArgs(args);
-        const rpcFuncMap = { registerNode, processMessage, transform, generateRosLib };
-        const result = rpcFuncMap[rpc](args);
-        validateWorkerArgs(result);
-        return result;
-      },
-      receive: () => null,
-    }));
+const basicPlayerState = {
+  startTime: { sec: 0, nsec: 0 },
+  endTime: { sec: 1, nsec: 0 },
+  isPlaying: true,
+  speed: 0.2,
+  lastSeekTime: 0,
+  parsedMessageDefinitionsByTopic: {},
+  playerWarnings: {},
+  bobjects: [],
+  totalBytesReceived: 1234,
+  messages: [],
+  messageOrder: "receiveTime",
+  currentTime: { sec: 0, nsec: 0 },
+  topics: [],
+  datatypes: {},
+};
+const parsedUpstreamMessages = [
+  {
+    topic: "/np_input",
+    receiveTime: { sec: 0, nsec: 1 },
+    message: {
+      payload: "bar",
+    },
+  },
+  {
+    topic: "/np_input",
+    receiveTime: { sec: 0, nsec: 100 },
+    message: {
+      payload: "baz",
+    },
+  },
+];
+const upstreamMessages = wrapMessages(parsedUpstreamMessages);
+const parseBobjectMessage = (msg) => ({ ...msg, message: deepParse(msg.message) });
+
+const setListenerHelper = (player: UserNodePlayer, numPromises: number = 1) => {
+  const signals = [...new Array(numPromises)].map(() => signal());
+  let numEmits = 0;
+  player.setListener(async (playerState) => {
+    const topicNames = [];
+    if (playerState.activeData) {
+      topicNames.push(...playerState.activeData.topics.map((topic) => topic.name));
+    }
+    const messages = (playerState.activeData || {}).messages || [];
+    const bobjects = (playerState.activeData || {}).bobjects || [];
+    signals[numEmits].resolve({
+      topicNames,
+      messages,
+      bobjects,
+      topics: playerState.activeData?.topics,
+      datatypes: playerState.activeData?.datatypes,
+    });
+    numEmits += 1;
   });
 
+  return signals;
+};
+
+describe("UserNodePlayer", () => {
   afterAll(() => {
-    window.localStorage.clear();
+    storage.clear();
   });
 
   describe("default player behavior", () => {
@@ -113,8 +140,14 @@ describe("UserNodePlayer", () => {
       const fakePlayer = new FakePlayer();
       const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
       userNodePlayer.setListener(async () => {});
-      userNodePlayer.setSubscriptions([{ topic: "/webviz/test" }, { topic: "/input/baz" }]);
-      expect(fakePlayer.subscriptions).toEqual([{ topic: "/webviz/test" }, { topic: "/input/baz" }]);
+      userNodePlayer.setSubscriptions([
+        { topic: "/webviz/test", format: "parsedMessages" },
+        { topic: "/input/baz", format: "parsedMessages" },
+      ]);
+      expect(fakePlayer.subscriptions).toEqual([
+        { topic: "/webviz/test", format: "parsedMessages" },
+        { topic: "/input/baz", format: "parsedMessages" },
+      ]);
     });
 
     it("delegates play and pause calls to underlying player", () => {
@@ -179,95 +212,7 @@ describe("UserNodePlayer", () => {
     });
   });
 
-  describe("behavior with NodePlayer as player", () => {
-    it("subscribes to general topics when subscribed to, without any Webviz nodes", () => {
-      const fakePlayer = new FakePlayer();
-      const nodePlayer = new NodePlayer(fakePlayer);
-      const userNodePlayer = new UserNodePlayer(nodePlayer, defaultUserNodeActions);
-      userNodePlayer.setListener(async () => {});
-      userNodePlayer.setSubscriptions([{ topic: "/input/foo" }, { topic: "/input/baz" }]);
-      expect(fakePlayer.subscriptions).toEqual([{ topic: "/input/foo" }, { topic: "/input/baz" }]);
-    });
-
-    it("subscribes to Webviz node topic when subscribed to, if it exists as an active Webviz node topic", () => {
-      const fakePlayer = new FakePlayer();
-      jest.spyOn(fakePlayer, "setSubscriptions");
-      const nodePlayer = new NodePlayer(fakePlayer, [hardcodedNode]);
-      const userNodePlayer = new UserNodePlayer(nodePlayer, defaultUserNodeActions);
-      const messages = [];
-      userNodePlayer.setListener(async (playerState) => {
-        messages.push(playerState);
-      });
-      userNodePlayer.setSubscriptions([{ topic: "/webviz/test" }, { topic: "/input/baz" }]);
-      expect(fakePlayer.setSubscriptions.mock.calls).toEqual([
-        [
-          [
-            { topic: "/input/baz" },
-            { requester: { name: "/webviz/test", type: "node" }, topic: "/input/foo" },
-            { requester: { name: "/webviz/test", type: "node" }, topic: "/input/bar" },
-          ],
-        ],
-      ]);
-    });
-
-    it("does not subscribe to Webviz node topic when subscribed to, if it doesn't exist as an active Webviz node", () => {
-      const fakePlayer = new FakePlayer();
-      const nodePlayer = new NodePlayer(fakePlayer);
-      const userNodePlayer = new UserNodePlayer(nodePlayer, defaultUserNodeActions);
-      userNodePlayer.setListener(async () => {});
-      userNodePlayer.setSubscriptions([{ topic: "/webviz/foo" }, { topic: "/input/baz" }]);
-      expect(fakePlayer.subscriptions).toEqual([{ topic: "/input/baz" }]);
-    });
-  });
-
   describe("user node behavior", () => {
-    const basicPlayerState = {
-      startTime: { sec: 0, nsec: 0 },
-      endTime: { sec: 1, nsec: 0 },
-      isPlaying: true,
-      speed: 0.2,
-      lastSeekTime: 0,
-      messageDefinitionsByTopic: {},
-      playerWarnings: {},
-    };
-    const upstreamMessages = [
-      {
-        topic: "/np_input",
-        receiveTime: { sec: 0, nsec: 1 },
-        message: {
-          payload: "bar",
-        },
-      },
-      {
-        topic: "/np_input",
-        receiveTime: { sec: 0, nsec: 100 },
-        message: {
-          payload: "baz",
-        },
-      },
-    ];
-
-    const setListenerHelper = (player: UserNodePlayer, numPromises: number = 1) => {
-      const signals = [...new Array(numPromises)].map(() => signal());
-      let numEmits = 0;
-      player.setListener(async (playerState) => {
-        const topicNames = [];
-        if (playerState.activeData) {
-          topicNames.push(...playerState.activeData.topics.map((topic) => topic.name));
-        }
-        const messages = (playerState.activeData || {}).messages || [];
-        signals[numEmits].resolve({
-          topicNames,
-          messages,
-          topics: playerState.activeData?.topics,
-          datatypes: playerState.activeData?.datatypes,
-        });
-        numEmits += 1;
-      });
-
-      return signals;
-    };
-
     it("exposes user node topics when available", async () => {
       const fakePlayer = new FakePlayer();
       const mockSetNodeDiagnostics = jest.fn();
@@ -275,10 +220,7 @@ describe("UserNodePlayer", () => {
         ...defaultUserNodeActions,
         setUserNodeDiagnostics: mockSetNodeDiagnostics,
       });
-
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
       userNodePlayer.setUserNodes({ nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode } });
-
       const [done] = setListenerHelper(userNodePlayer);
 
       fakePlayer.emit({
@@ -305,7 +247,6 @@ describe("UserNodePlayer", () => {
         setUserNodeDiagnostics: mockSetNodeDiagnostics,
       });
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
       userNodePlayer.setUserNodes({ nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode } });
 
       const [done1, done2, done3] = setListenerHelper(userNodePlayer, 3);
@@ -323,7 +264,7 @@ describe("UserNodePlayer", () => {
       const { topics: firstTopics, datatypes: firstDatatypes } = await done1;
       expect(firstTopics).toEqual([
         { name: "/np_input", datatype: "/np_input_datatype" },
-        { name: "/webviz_node/1", datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` },
+        { name: "/webviz_node/1", datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, inputTopics: ["/np_input"] },
       ]);
       expect(firstDatatypes).toEqual({
         foo: { fields: [] },
@@ -333,6 +274,7 @@ describe("UserNodePlayer", () => {
             { name: "value", type: "string", isArray: false, isComplex: false },
           ],
         },
+        ...basicDatatypes,
       });
 
       // Seek should keep topics memoized.
@@ -357,8 +299,7 @@ describe("UserNodePlayer", () => {
         addUserNodeLogs: mockAddUserNodeLogs,
       });
 
-      await trustUserNode({ id: nodeId, sourceCode: `${nodeUserCode}\nlog("LOG VALUE HERE");` });
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       userNodePlayer.setUserNodes({
         nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: `${nodeUserCode}\nlog("LOG VALUE HERE");` },
       });
@@ -369,7 +310,7 @@ describe("UserNodePlayer", () => {
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: messagesArray,
+        bobjects: messagesArray,
         messageOrder: "receiveTime",
         currentTime: { sec: 0, nsec: 0 },
         topics: [{ name: "/np_input", datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }],
@@ -380,7 +321,7 @@ describe("UserNodePlayer", () => {
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: messagesArray,
+        bobjects: messagesArray,
         messageOrder: "receiveTime",
         currentTime: { sec: 0, nsec: 0 },
         topics: [{ name: "/np_input", datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }],
@@ -410,8 +351,8 @@ describe("UserNodePlayer", () => {
 
       const { topicNames } = await done;
       userNodePlayer.setUserNodes({ nodeId: { name: "someNodeName", sourceCode: nodeUserCode } });
-      userNodePlayer.setSubscriptions(topicNames.map((topic) => ({ topic })));
-      expect(fakePlayer.subscriptions).toEqual([{ topic: "/np_input" }]);
+      userNodePlayer.setSubscriptions(topicNames.map((topic) => ({ topic, format: "parsedMessages" })));
+      expect(fakePlayer.subscriptions).toEqual([{ topic: "/np_input", format: "parsedMessages" }]);
     });
 
     it("does not produce messages from UserNodes if not subscribed to", async () => {
@@ -420,14 +361,13 @@ describe("UserNodePlayer", () => {
 
       const [done] = setListenerHelper(userNodePlayer);
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
       userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
       });
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -436,7 +376,7 @@ describe("UserNodePlayer", () => {
 
       const { messages, topicNames } = await done;
       expect(topicNames).toEqual(["/np_input", `${DEFAULT_WEBVIZ_NODE_PREFIX}1`]);
-      expect(messages).toEqual([upstreamMessages[0]]);
+      expect(messages).toEqual([]);
     });
 
     it("produces messages from user input node code with messages produced from underlying player", async () => {
@@ -445,16 +385,14 @@ describe("UserNodePlayer", () => {
 
       const [done] = setListenerHelper(userNodePlayer);
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
-      // TODO: test here to make sure the user node does not produce messages if not subscribed to.
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       await userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
       });
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -464,7 +402,6 @@ describe("UserNodePlayer", () => {
       const { messages } = await done;
 
       expect(messages).toEqual([
-        upstreamMessages[0],
         {
           topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
           receiveTime: upstreamMessages[0].receiveTime,
@@ -484,15 +421,14 @@ describe("UserNodePlayer", () => {
 
       const [done] = setListenerHelper(userNodePlayer);
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       await userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
       });
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -503,21 +439,77 @@ describe("UserNodePlayer", () => {
       expect(mockAddUserNodeLogs).not.toHaveBeenCalled();
     });
 
+    it("adds to logs even when there is a runtime error", async () => {
+      const fakePlayer = new FakePlayer();
+      const addUserNodeLogs = jest.fn();
+      const setUserNodeDiagnostics = jest.fn();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, {
+        ...defaultUserNodeActions,
+        addUserNodeLogs,
+        setUserNodeDiagnostics,
+      });
+      const datatypes = { foo: { fields: [{ name: "payload", type: "string" }] } };
+
+      const [done1, done2] = setListenerHelper(userNodePlayer, 2);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
+      await userNodePlayer.setUserNodes({
+        [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCodeWithLogAndError },
+      });
+
+      fakePlayer.emit({
+        ...basicPlayerState,
+        bobjects: [upstreamMessages[0]],
+        messageOrder: "receiveTime",
+        currentTime: upstreamMessages[0].receiveTime,
+        topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+        datatypes,
+      });
+      await done1;
+
+      fakePlayer.emit({
+        ...basicPlayerState,
+        bobjects: [upstreamMessages[1]],
+        messageOrder: "receiveTime",
+        currentTime: upstreamMessages[1].receiveTime,
+        topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+        datatypes,
+      });
+      await done2;
+
+      expect(addUserNodeLogs.mock.calls).toEqual([
+        [{ [nodeId]: { logs: [{ source: "processMessage", value: "Running. Will fail." }] } }],
+        [{ [nodeId]: { logs: [{ source: "processMessage", value: "Running. Will succeed." }] } }],
+      ]);
+      // Errors are not immediately cleared by successful calls -- they stick around for the user
+      // to read.
+      expect(setUserNodeDiagnostics).toHaveBeenLastCalledWith({
+        [nodeId]: {
+          diagnostics: [
+            {
+              code: ErrorCodes.RUNTIME,
+              message: "Error: Error!",
+              severity: DiagnosticSeverity.Error,
+              source: Sources.Runtime,
+            },
+          ],
+        },
+      });
+    });
+
     it("provides access to './pointClouds' library for user input node code", async () => {
       const fakePlayer = new FakePlayer();
       const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
 
       const [done] = setListenerHelper(userNodePlayer);
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCodeWithPointClouds });
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       await userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCodeWithPointClouds },
       });
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -525,9 +517,7 @@ describe("UserNodePlayer", () => {
       });
 
       const { messages } = await done;
-
       expect(messages).toEqual([
-        upstreamMessages[0],
         {
           topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
           receiveTime: upstreamMessages[0].receiveTime,
@@ -554,16 +544,15 @@ describe("UserNodePlayer", () => {
         };
       `;
 
-      await trustUserNode({ id: nodeId, sourceCode: unionTypeReturn });
       // TODO: test here to make sure the user node does not produce messages if not subscribed to.
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       await userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: unionTypeReturn },
       });
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -571,11 +560,11 @@ describe("UserNodePlayer", () => {
       });
 
       const result = await done;
-      expect(result.messages).toEqual([upstreamMessages[0]]);
+      expect(result.messages).toEqual([]);
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[1]],
+        bobjects: [upstreamMessages[1]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[1].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -584,13 +573,64 @@ describe("UserNodePlayer", () => {
 
       const nextResult = await nextDone;
       expect(nextResult.messages).toEqual([
-        upstreamMessages[1],
         {
           topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
           receiveTime: upstreamMessages[1].receiveTime,
           message: { custom_np_field: "abc", value: "baz" },
         },
       ]);
+    });
+
+    it("should error if multiple nodes output to the same topic", async () => {
+      const fakePlayer = new FakePlayer();
+      const mockSetNodeDiagnostics = jest.fn();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, {
+        ...defaultUserNodeActions,
+        setUserNodeDiagnostics: mockSetNodeDiagnostics,
+      });
+      const [done] = setListenerHelper(userNodePlayer);
+
+      userNodePlayer.setUserNodes({
+        [`${DEFAULT_WEBVIZ_NODE_PREFIX}1`]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
+        [`${DEFAULT_WEBVIZ_NODE_PREFIX}2`]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}2`, sourceCode: nodeUserCode },
+      });
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
+
+      fakePlayer.emit({
+        ...basicPlayerState,
+        bobjects: [upstreamMessages[0]],
+        messageOrder: "receiveTime",
+        currentTime: upstreamMessages[0].receiveTime,
+        topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+        datatypes: { foo: { fields: [] }, "std_msgs/Header": { fields: [] } },
+      });
+
+      const { messages, topics } = await done;
+
+      expect(messages).toHaveLength(1);
+      expect(topics).toEqual([
+        { name: "/np_input", datatype: "std_msgs/Header" },
+        {
+          name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          inputTopics: ["/np_input"],
+        },
+      ]);
+      expect(mockSetNodeDiagnostics).toHaveBeenCalledWith({
+        [`${DEFAULT_WEBVIZ_NODE_PREFIX}1`]: { diagnostics: [] },
+      });
+      expect(mockSetNodeDiagnostics).toHaveBeenCalledWith({
+        [`${DEFAULT_WEBVIZ_NODE_PREFIX}2`]: {
+          diagnostics: [
+            {
+              source: Sources.OutputTopicChecker,
+              severity: DiagnosticSeverity.Error,
+              message: `Output "${DEFAULT_WEBVIZ_NODE_PREFIX}1" must be unique`,
+              code: ErrorCodes.OutputTopicChecker.NOT_UNIQUE,
+            },
+          ],
+        },
+      });
     });
 
     it("should handle multiple user nodes", async () => {
@@ -603,10 +643,7 @@ describe("UserNodePlayer", () => {
         [`${DEFAULT_WEBVIZ_NODE_PREFIX}1`]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
       });
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
-
       const nodeUserCode2 = nodeUserCode.replace(`${DEFAULT_WEBVIZ_NODE_PREFIX}1`, `${DEFAULT_WEBVIZ_NODE_PREFIX}2`);
-      await trustUserNode({ id: `${nodeId}2`, sourceCode: nodeUserCode2 });
       userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
         [`${nodeId}2`]: {
@@ -616,13 +653,13 @@ describe("UserNodePlayer", () => {
       });
 
       userNodePlayer.setSubscriptions([
-        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` },
-        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}2` },
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}2`, format: "parsedMessages" },
       ]);
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -631,9 +668,8 @@ describe("UserNodePlayer", () => {
 
       const { messages } = await done;
 
-      expect(messages.length).toEqual(3);
+      expect(messages).toHaveLength(2);
       expect(messages).toEqual([
-        upstreamMessages[0],
         {
           topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
           receiveTime: upstreamMessages[0].receiveTime,
@@ -646,6 +682,7 @@ describe("UserNodePlayer", () => {
         },
       ]);
     });
+
     it("resets user node state on seek", async () => {
       const sourceCode = `
         let innerState = 0;
@@ -660,18 +697,17 @@ describe("UserNodePlayer", () => {
       const fakePlayer = new FakePlayer();
       const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
 
-      await trustUserNode({ id: nodeId, sourceCode });
       userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode },
       });
 
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
 
       const [firstDone, secondDone] = setListenerHelper(userNodePlayer, 2);
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -682,7 +718,7 @@ describe("UserNodePlayer", () => {
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[1]],
+        bobjects: [upstreamMessages[1]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[1].receiveTime,
         lastSeekTime: 1,
@@ -715,11 +751,11 @@ describe("UserNodePlayer", () => {
           export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
           export default (messages: any): { num: number } => {
             if (messages.message) {
-             const badPropertyAcess = messages.message.message.message;
+             const badPropertyAccess = messages.message.message.message;
             }
             return { num: 42 };
           };`,
-        error: "TypeError: Cannot read property 'message' of undefined",
+        error: "TypeError: Cannot read properties of undefined (reading 'message')",
       },
       {
         code: `
@@ -730,7 +766,7 @@ describe("UserNodePlayer", () => {
           export default (messages: any): { num: number } => {
             return { num: 42 };
           };`,
-        error: "TypeError: Cannot read property 'bad' of undefined",
+        error: "TypeError: Cannot read properties of undefined (reading 'bad')",
       },
       {
         code: `
@@ -785,15 +821,14 @@ describe("UserNodePlayer", () => {
         setUserNodeDiagnostics: mockSetNodeDiagnostics,
       });
 
-      await trustUserNode({ id: nodeId, sourceCode: code });
-      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
       userNodePlayer.setUserNodes({ nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: code } });
 
       const [done] = setListenerHelper(userNodePlayer);
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -822,7 +857,6 @@ describe("UserNodePlayer", () => {
       const fakePlayer = new FakePlayer();
       const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
 
-      await trustUserNode({ id: nodeId, sourceCode: nodeUserCode });
       userNodePlayer.setUserNodes({
         [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
       });
@@ -831,7 +865,7 @@ describe("UserNodePlayer", () => {
 
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -844,7 +878,7 @@ describe("UserNodePlayer", () => {
       userNodePlayer.setUserNodes({});
       fakePlayer.emit({
         ...basicPlayerState,
-        messages: [upstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
         messageOrder: "receiveTime",
         currentTime: upstreamMessages[0].receiveTime,
         topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -852,6 +886,37 @@ describe("UserNodePlayer", () => {
       });
       const { topicNames: secondTopicNames } = await secondDone;
       expect(secondTopicNames).toEqual(["/np_input"]);
+    });
+    it("properly sets diagnostics when there is an error", async () => {
+      const code = `
+        export const inputs = ["/np_input"];
+        export const output = "/bad_prefix";
+        export default (messages: any): any => {};
+      `;
+      const fakePlayer = new FakePlayer();
+      const mockSetNodeDiagnostics = jest.fn();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, {
+        ...defaultUserNodeActions,
+        setUserNodeDiagnostics: mockSetNodeDiagnostics,
+      });
+
+      userNodePlayer.setUserNodes({ nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: code } });
+
+      const [done] = setListenerHelper(userNodePlayer);
+      fakePlayer.emit(basicPlayerState);
+      await done;
+      expect(mockSetNodeDiagnostics).toHaveBeenLastCalledWith({
+        nodeId: {
+          diagnostics: [
+            {
+              severity: DiagnosticSeverity.Error,
+              message: expect.any(String),
+              source: Sources.OutputTopicChecker,
+              code: ErrorCodes.OutputTopicChecker.BAD_PREFIX,
+            },
+          ],
+        },
+      });
     });
 
     describe("user logging", () => {
@@ -901,13 +966,12 @@ describe("UserNodePlayer", () => {
         });
         const [done] = setListenerHelper(userNodePlayer);
 
-        await trustUserNode({ id: nodeId, sourceCode: code });
-        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
         userNodePlayer.setUserNodes({ [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}nodeName`, sourceCode: code } });
 
         fakePlayer.emit({
           ...basicPlayerState,
-          messages: [upstreamMessages[0]],
+          bobjects: [upstreamMessages[0]],
           messageOrder: "receiveTime",
           currentTime: upstreamMessages[0].receiveTime,
           topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -949,170 +1013,19 @@ describe("UserNodePlayer", () => {
 
         fakePlayer.emit({
           ...basicPlayerState,
-          messages: [upstreamMessages[0]],
+          bobjects: [upstreamMessages[0]],
           messageOrder: "receiveTime",
           currentTime: upstreamMessages[0].receiveTime,
           topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
           datatypes: { foo: { fields: [] }, "std_msgs/Header": { fields: [] } },
         });
 
-        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
+        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
         userNodePlayer.setUserNodes({ nodeId: { name: "nodeName", sourceCode: code } });
 
         const { topicNames } = await done;
         expect(mockAddNodeLogs.mock.calls).toEqual([]);
         expect(topicNames).toEqual(["/np_input"]);
-      });
-    });
-
-    describe("Node Security", () => {
-      beforeEach(() => {
-        global.wasExecuted = false;
-        window.localStorage.clear();
-      });
-
-      afterAll(() => {
-        delete global.wasExecuted;
-        window.localStorage.clear();
-      });
-
-      const attemptToExecute = async (id: string, code: string, mockSetUserNodeTrust: SetUserNodeTrust = jest.fn()) => {
-        const fakePlayer = new FakePlayer();
-        const mockSetNodeDiagnostics = jest.fn();
-        const userNodePlayer = new UserNodePlayer(fakePlayer, {
-          ...defaultUserNodeActions,
-          setUserNodeDiagnostics: mockSetNodeDiagnostics,
-          setUserNodeTrust: mockSetUserNodeTrust,
-        });
-        const [done] = setListenerHelper(userNodePlayer);
-
-        // This will trigger the node to register
-        userNodePlayer.setUserNodes({ [id]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: code } });
-        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
-
-        fakePlayer.emit({
-          ...basicPlayerState,
-          messages: [upstreamMessages[0]],
-          messageOrder: "receiveTime",
-          currentTime: upstreamMessages[0].receiveTime,
-          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
-          datatypes: { foo: { fields: [] }, "std_msgs/Header": { fields: [] } },
-        });
-
-        await done;
-      };
-
-      it("does not execute nodes that have not been explicitly approved", async () => {
-        const sourceCode = `
-          // @ts-ignore
-          global.wasExecuted = true;
-          export const inputs = ["/np_input"];
-          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
-          export default (message: any): { str: string } => {
-            return { str: '' };
-          };
-        `;
-
-        await attemptToExecute("mock_id", sourceCode);
-        expect(global.wasExecuted).toEqual(false);
-      });
-
-      it("executes nodes that have been explicitly approved", async () => {
-        const id = "mock_id";
-        const sourceCode = `
-          // @ts-ignore
-          global.wasExecuted = true;
-          export const inputs = ["/np_input"];
-          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
-          export default (message: any): { str: string } => {
-            return { str: '' };
-          };
-        `;
-
-        await trustUserNode({ id, sourceCode });
-        await attemptToExecute(id, sourceCode);
-        expect(global.wasExecuted).toEqual(true);
-      });
-
-      it("flags nodes as a security risk that have not been approved", async () => {
-        const id = "mock_id";
-        const sourceCode = `
-          // @ts-ignore
-          global.wasExecuted = true;
-          export const inputs = ["/np_input"];
-          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
-          export default (message: any): { str: string } => {
-            return { str: '' };
-          };
-        `;
-
-        const mockSetUserNodeTrust = jest.fn();
-        await attemptToExecute(id, sourceCode, mockSetUserNodeTrust);
-        expect(global.wasExecuted).toEqual(false);
-        expect(mockSetUserNodeTrust).toHaveBeenCalledWith({ id, trusted: false });
-      });
-
-      it("flags nodes as secure if the user explicitly trusts them", async () => {
-        const id = "mock_id";
-        const sourceCode = `
-          // @ts-ignore
-          global.wasExecuted = true;
-          export const inputs = ["/np_input"];
-          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
-          export default (message: any): { str: string } => {
-            return { str: '' };
-          };
-        `;
-
-        const mockSetUserNodeTrust = jest.fn();
-
-        const fakePlayer = new FakePlayer();
-        const mockSetNodeDiagnostics = jest.fn();
-        const userNodePlayer = new UserNodePlayer(fakePlayer, {
-          ...defaultUserNodeActions,
-          setUserNodeDiagnostics: mockSetNodeDiagnostics,
-          setUserNodeTrust: mockSetUserNodeTrust,
-        });
-        const [done, nextDone] = setListenerHelper(userNodePlayer, 2);
-
-        // These actions will trigger the node to register
-        userNodePlayer.setUserNodes({ [id]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode } });
-        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }]);
-
-        fakePlayer.emit({
-          ...basicPlayerState,
-          messages: [upstreamMessages[0]],
-          messageOrder: "receiveTime",
-          currentTime: upstreamMessages[0].receiveTime,
-          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
-          datatypes: { foo: { fields: [] }, "std_msgs/Header": { fields: [] } },
-        });
-
-        await done;
-
-        expect(global.wasExecuted).toEqual(false);
-        expect(mockSetUserNodeTrust).toHaveBeenLastCalledWith({ id, trusted: false });
-
-        // Simulate user clicking 'trust'
-        await trustUserNode({ id, sourceCode });
-        // Trigger workers to reset.
-        await userNodePlayer.setUserNodes({ [id]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode } });
-        // Expect that the underlying player has correctly received subscribe calls.
-        expect(fakePlayer?.subscriptions[0]?.topic).toEqual("/np_input");
-
-        fakePlayer.emit({
-          ...basicPlayerState,
-          messages: [upstreamMessages[0]],
-          messageOrder: "receiveTime",
-          currentTime: upstreamMessages[0].receiveTime,
-          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
-          datatypes: { foo: { fields: [] }, "std_msgs/Header": { fields: [] } },
-        });
-
-        await nextDone;
-
-        expect(global.wasExecuted).toEqual(true);
-        expect(mockSetUserNodeTrust).toHaveBeenLastCalledWith({ id, trusted: true });
       });
     });
 
@@ -1132,30 +1045,28 @@ describe("UserNodePlayer", () => {
         const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
         const firstName = `${DEFAULT_WEBVIZ_NODE_PREFIX}innerState`;
 
-        await trustUserNode({ id: nodeId, sourceCode });
         userNodePlayer.setUserNodes({
           [nodeId]: { name: firstName, sourceCode },
         });
-        userNodePlayer.setSubscriptions([{ topic: firstName }]);
+        userNodePlayer.setSubscriptions([{ topic: firstName, format: "parsedMessages" }]);
 
         // Update the name of the node.
         const secondName = `${DEFAULT_WEBVIZ_NODE_PREFIX}state`;
         const secondSourceCode = sourceCode.replace(/innerState/g, "state");
 
-        await trustUserNode({ id: nodeId, sourceCode: secondSourceCode });
         userNodePlayer.setUserNodes({
           [nodeId]: {
             name: secondName,
             sourceCode: secondSourceCode,
           },
         });
-        userNodePlayer.setSubscriptions([{ topic: secondName }]);
+        userNodePlayer.setSubscriptions([{ topic: secondName, format: "parsedMessages" }]);
 
         const [done] = setListenerHelper(userNodePlayer);
 
         fakePlayer.emit({
           ...basicPlayerState,
-          messages: [upstreamMessages[0]],
+          bobjects: [upstreamMessages[0]],
           messageOrder: "receiveTime",
           currentTime: upstreamMessages[0].receiveTime,
           topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -1165,7 +1076,11 @@ describe("UserNodePlayer", () => {
         const { topics } = await done;
         expect(topics).toEqual([
           { name: "/np_input", datatype: "std_msgs/Header" },
-          { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}state`, datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}state` },
+          {
+            name: `${DEFAULT_WEBVIZ_NODE_PREFIX}state`,
+            datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}state`,
+            inputTopics: ["/np_input"],
+          },
         ]);
       });
       it("uses dynamically generated type definitions", async () => {
@@ -1183,17 +1098,16 @@ describe("UserNodePlayer", () => {
         const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
         const firstName = `${DEFAULT_WEBVIZ_NODE_PREFIX}state`;
 
-        await trustUserNode({ id: nodeId, sourceCode });
         userNodePlayer.setUserNodes({
           [nodeId]: { name: firstName, sourceCode },
         });
-        userNodePlayer.setSubscriptions([{ topic: firstName }]);
+        userNodePlayer.setSubscriptions([{ topic: firstName, format: "parsedMessages" }]);
 
         const [done] = setListenerHelper(userNodePlayer);
 
         fakePlayer.emit({
           ...basicPlayerState,
-          messages: [upstreamMessages[0]],
+          bobjects: [upstreamMessages[0]],
           messageOrder: "receiveTime",
           currentTime: upstreamMessages[0].receiveTime,
           topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
@@ -1203,9 +1117,525 @@ describe("UserNodePlayer", () => {
         const { topics } = await done;
         expect(topics).toEqual([
           { name: "/np_input", datatype: "std_msgs/Header" },
-          { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}state`, datatype: "std_msgs/Header" },
+          { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}state`, datatype: "std_msgs/Header", inputTopics: ["/np_input"] },
         ]);
       });
+
+      it("can nest bag datatypes inside object expressions", async () => {
+        const sourceCode = `
+          import { Input, Messages } from 'ros';
+          type Output = { ref: Messages.sensor_msgs__TimeReference };
+          let innerState = 0;
+          export const inputs = ["/np_input"];
+          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}state";
+          export default (message: Input<"/np_input">): Output => {
+            return {
+              ref: {
+                header: message.message,
+                time_ref: message.message.stamp,
+                source: "",
+              },
+            };
+          };
+        `;
+
+        const fakePlayer = new FakePlayer();
+
+        const mockSetNodeDiagnostics = jest.fn();
+        const userNodePlayer = new UserNodePlayer(fakePlayer, {
+          ...defaultUserNodeActions,
+          setUserNodeDiagnostics: mockSetNodeDiagnostics,
+        });
+        const firstName = `${DEFAULT_WEBVIZ_NODE_PREFIX}state`;
+
+        userNodePlayer.setUserNodes({
+          [nodeId]: { name: firstName, sourceCode },
+        });
+        userNodePlayer.setSubscriptions([{ topic: firstName, format: "parsedMessages" }]);
+
+        const [done] = setListenerHelper(userNodePlayer);
+
+        fakePlayer.emit({
+          ...basicPlayerState,
+          bobjects: [upstreamMessages[0]],
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+          datatypes: exampleDatatypes,
+        });
+
+        const { topics, datatypes } = await done;
+        // No errors
+        expect(mockSetNodeDiagnostics.mock.calls).toEqual([[{ nodeId: { diagnostics: [] } }]]);
+        expect(topics).toEqual([
+          { name: "/np_input", datatype: "std_msgs/Header" },
+          { name: firstName, datatype: firstName, inputTopics: ["/np_input"] },
+        ]);
+        expect(datatypes?.[firstName]).toEqual({
+          fields: [{ name: "ref", type: "sensor_msgs/TimeReference", isComplex: true, isArray: false }],
+        });
+      });
+    });
+
+    describe("global variable behavior", () => {
+      it("passes global variables to nodes", async () => {
+        const fakePlayer = new FakePlayer();
+        const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+        const [done, done2] = setListenerHelper(userNodePlayer, 2);
+
+        userNodePlayer.setGlobalVariables({ globalValue: "aaa" });
+        userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" }]);
+        await userNodePlayer.setUserNodes({
+          [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCodeWithGlobalVars },
+        });
+
+        const playerState = {
+          ...basicPlayerState,
+          bobjects: [upstreamMessages[0]],
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+          datatypes: { foo: { fields: [] } },
+        };
+        fakePlayer.emit(playerState);
+
+        const { messages } = await done;
+        expect(messages).toEqual([
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "aaa", value: "aaa" },
+          },
+        ]);
+
+        userNodePlayer.setGlobalVariables({ globalValue: "bbb" });
+        fakePlayer.emit(playerState);
+
+        const { messages: messages2 } = await done2;
+        expect(messages2).toEqual([
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "bbb", value: "bbb" },
+          },
+        ]);
+      });
+    });
+
+    describe("source two support", () => {
+      const upstreamMessagesWithSourceTwo = wrapMessages([
+        {
+          topic: "/np_input",
+          receiveTime: { sec: 0, nsec: 1 },
+          message: { payload: "bar" },
+        },
+        {
+          topic: `${$WEBVIZ_SOURCE_2}/np_input`,
+          receiveTime: { sec: 0, nsec: 1 },
+          message: { payload: "bar2" },
+        },
+      ]);
+
+      const nodeUserCodeWithSourceTwoInputs = `
+        export const inputs = ["/np_input", "${$WEBVIZ_SOURCE_2}/np_input"];
+        export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
+        let lastStamp, lastReceiveTime;
+        export default (message: { message: { payload: string } }): { custom_np_field: string, value: string } => {
+          return { custom_np_field: "abc", value: message.message.payload };
+        };
+      `;
+
+      it("does not support source two if the node uses any source two topics", async () => {
+        const fakePlayer = new FakePlayer();
+        const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+        const [done] = setListenerHelper(userNodePlayer);
+
+        userNodePlayer.setSubscriptions([
+          { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+          { topic: `${$WEBVIZ_SOURCE_2}${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+        ]);
+        await userNodePlayer.setUserNodes({
+          [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCodeWithSourceTwoInputs },
+        });
+
+        fakePlayer.emit({
+          ...basicPlayerState,
+          bobjects: upstreamMessagesWithSourceTwo,
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [
+            { name: "/np_input", datatype: "std_msgs/Header" },
+            { name: `${$WEBVIZ_SOURCE_2}/np_input`, datatype: "std_msgs/Header" },
+          ],
+          datatypes: { foo: { fields: [] } },
+        });
+
+        const { messages } = await done;
+        // Expect no messages starting with $WEBVIZ_SOURCE_2
+        expect(messages).toEqual([
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "abc", value: "bar" },
+          },
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "abc", value: "bar2" },
+          },
+        ]);
+      });
+
+      it("warns if there are topics from source_1 that don't exist in source_2", async () => {
+        const fakePlayer = new FakePlayer();
+        const mockSetNodeDiagnostics = jest.fn();
+        const userNodePlayer = new UserNodePlayer(fakePlayer, {
+          ...defaultUserNodeActions,
+          setUserNodeDiagnostics: mockSetNodeDiagnostics,
+        });
+        const [done] = setListenerHelper(userNodePlayer);
+
+        userNodePlayer.setSubscriptions([
+          { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+          { topic: `${$WEBVIZ_SOURCE_2}${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+        ]);
+
+        await userNodePlayer.setUserNodes({
+          [nodeId]: {
+            name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            sourceCode: `
+              export const inputs = ["/np_input", "/another_np_input"];
+              export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
+              export default (message: { message: { payload: string } }): { custom_np_field: string, value: string } => {
+                return { custom_np_field: "abc", value: message.message.payload };
+              };
+            `,
+          },
+        });
+
+        fakePlayer.emit({
+          ...basicPlayerState,
+          bobjects: upstreamMessagesWithSourceTwo,
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [
+            { name: "/np_input", datatype: "std_msgs/Header" },
+            { name: "/another_np_input", datatype: "std_msgs/Header" },
+            { name: `${$WEBVIZ_SOURCE_2}/np_input`, datatype: "std_msgs/Header" },
+          ],
+          datatypes: { foo: { fields: [] } },
+        });
+
+        await done;
+        expect(mockSetNodeDiagnostics).toHaveBeenCalledWith({
+          nodeId: {
+            diagnostics: [
+              {
+                severity: DiagnosticSeverity.Warning,
+                message: `Input "${$WEBVIZ_SOURCE_2}/another_np_input" is not yet available.`,
+                source: Sources.InputTopicsChecker,
+                code: ErrorCodes.InputTopicsChecker.NO_TOPIC_AVAIL,
+              },
+            ],
+          },
+        });
+      });
+
+      it("produces messages for multiple sources", async () => {
+        const fakePlayer = new FakePlayer();
+        const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+        const [done] = setListenerHelper(userNodePlayer);
+
+        userNodePlayer.setSubscriptions([
+          { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+          { topic: `${$WEBVIZ_SOURCE_2}${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+        ]);
+        await userNodePlayer.setUserNodes({
+          [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
+        });
+
+        fakePlayer.emit({
+          ...basicPlayerState,
+          bobjects: upstreamMessagesWithSourceTwo,
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [
+            { name: "/np_input", datatype: "std_msgs/Header" },
+            { name: `${$WEBVIZ_SOURCE_2}/np_input`, datatype: "std_msgs/Header" },
+          ],
+          datatypes: { foo: { fields: [] } },
+        });
+
+        const { messages } = await done;
+        expect(messages).toEqual([
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "abc", value: "bar" },
+          },
+          {
+            topic: `${$WEBVIZ_SOURCE_2}${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { custom_np_field: "abc", value: "bar2" },
+          },
+        ]);
+      });
+    });
+  });
+
+  describe("bobjects", () => {
+    const subscribeAndEmitFromPlayer = async (
+      subscriptions: SubscribePayload[]
+    ): Promise<{ messages: $ReadOnlyArray<Message>, bobjects: $ReadOnlyArray<BobjectMessage> }> => {
+      const fakePlayer = new FakePlayer();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+
+      const [done] = setListenerHelper(userNodePlayer);
+
+      userNodePlayer.setSubscriptions(subscriptions);
+      await userNodePlayer.setUserNodes({
+        [nodeId]: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: nodeUserCode },
+      });
+
+      const datatypes = { foo: { fields: [{ name: "payload", type: "string" }] } };
+
+      fakePlayer.emit({
+        ...basicPlayerState,
+        messages: [parsedUpstreamMessages[0]],
+        bobjects: [upstreamMessages[0]],
+        messageOrder: "receiveTime",
+        currentTime: upstreamMessages[0].receiveTime,
+        topics: [{ name: "/np_input", datatype: "foo" }],
+        datatypes,
+      });
+
+      const { messages, bobjects } = await done;
+
+      // Generated bobjects should be "true binary bobjects"
+      bobjects.forEach(({ message, topic }) => {
+        if (topic.startsWith(`${DEFAULT_WEBVIZ_NODE_PREFIX}`)) {
+          expect(getSourceData(Object.getPrototypeOf((message: any)).constructor)).toHaveProperty("buffer");
+        }
+      });
+      return { messages, bobjects };
+    };
+
+    it("emits sorted bobjects when subscribed to", async () => {
+      const { messages, bobjects } = await subscribeAndEmitFromPlayer([
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" },
+      ]);
+      expect(messages).toEqual([parsedUpstreamMessages[0]]);
+
+      expect(bobjects).toHaveLength(2);
+      expect(bobjects.map(parseBobjectMessage)).toEqual([
+        parsedUpstreamMessages[0],
+        {
+          topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          receiveTime: upstreamMessages[0].receiveTime,
+          message: { custom_np_field: "abc", value: "bar" },
+        },
+      ]);
+    });
+
+    it("persists bobjects from underlying player", async () => {
+      const { messages, bobjects } = await subscribeAndEmitFromPlayer([
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" },
+      ]);
+      expect(messages.length).toEqual(1);
+      expect(messages).toEqual([parsedUpstreamMessages[0]]);
+
+      expect(bobjects.length).toEqual(2);
+      expect(bobjects.map(parseBobjectMessage).filter(({ topic }) => topic !== "/webviz_node/1")).toEqual([
+        parsedUpstreamMessages[0],
+      ]);
+    });
+
+    it("emits bobjects and parsedMessages when subscribed to", async () => {
+      const { messages, bobjects } = await subscribeAndEmitFromPlayer([
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "parsedMessages" },
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" },
+      ]);
+
+      expect(messages.length).toEqual(2);
+      expect(messages).toEqual([
+        parsedUpstreamMessages[0],
+        {
+          topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          receiveTime: upstreamMessages[0].receiveTime,
+          message: { custom_np_field: "abc", value: "bar" },
+        },
+      ]);
+
+      expect(bobjects).toHaveLength(2);
+      expect(bobjects.map(parseBobjectMessage).filter(({ topic }) => topic === "/webviz_node/1")).toEqual([
+        {
+          topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          receiveTime: upstreamMessages[0].receiveTime,
+          message: { custom_np_field: "abc", value: "bar" },
+        },
+      ]);
+    });
+
+    it("exposes user node topics when available", async () => {
+      const source = `
+        import { Messages } from 'ros';
+        export const inputs = ["/np_input"];
+        export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}1";
+        export default (message: { message: { payload: string } }): Messages.foo => {
+          return {};
+        };
+      `;
+      const fakePlayer = new FakePlayer();
+      const mockSetNodeDiagnostics = jest.fn();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, {
+        ...defaultUserNodeActions,
+        setUserNodeDiagnostics: mockSetNodeDiagnostics,
+      });
+
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" }]);
+      userNodePlayer.setUserNodes({ nodeId: { name: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, sourceCode: source } });
+
+      const [done] = setListenerHelper(userNodePlayer);
+
+      fakePlayer.emit({
+        ...basicPlayerState,
+        bobjects: wrapMessages([
+          {
+            message: { payload: "" },
+            topic: "/np_input",
+            receiveTime: { sec: 0, nsec: 0 },
+          },
+        ]),
+        messageOrder: "receiveTime",
+        currentTime: { sec: 0, nsec: 0 },
+        topics: [{ name: "/np_input", datatype: `${DEFAULT_WEBVIZ_NODE_PREFIX}1` }],
+        datatypes: { foo: { fields: [] } },
+      });
+
+      const { bobjects } = await done;
+      const nodeBobjects = bobjects.filter(({ topic }) => topic !== "/np_input");
+      expect(nodeBobjects).toHaveLength(1);
+      expect(deepParse(nodeBobjects[0].message)).toEqual({});
+    });
+
+    it("prefers input datatype definitions to basicDatatypes", async () => {
+      const fakePlayer = new FakePlayer();
+      const userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+      const [done] = setListenerHelper(userNodePlayer);
+      fakePlayer.emit({ ...basicPlayerState, datatypes: { "std_msgs/Header": { fields: [] } } });
+
+      const { datatypes } = await done;
+      expect(datatypes?.["std_msgs/Header"].fields).toHaveLength(0);
+    });
+
+    it("does not emit twice the number of messages if subscribed to twice", async () => {
+      const { messages, bobjects } = await subscribeAndEmitFromPlayer([
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" },
+        { topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`, format: "bobjects" },
+      ]);
+      expect(messages).toEqual([parsedUpstreamMessages[0]]);
+
+      expect(bobjects.map(parseBobjectMessage).filter(({ topic }) => topic === "/webviz_node/1")).toEqual([
+        {
+          topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}1`,
+          receiveTime: upstreamMessages[0].receiveTime,
+          message: { custom_np_field: "abc", value: "bar" },
+        },
+      ]);
+    });
+  });
+
+  describe("node registration caching", () => {
+    let fakePlayer, userNodePlayer, emit, expectFromSource;
+    const callCount = (action) => {
+      return MockUserNodePlayerWorker.prototype.messageSpy.mock.calls.filter(([a]) => a === action).length;
+    };
+    beforeEach(() => {
+      jest.spyOn(MockUserNodePlayerWorker.prototype, "messageSpy");
+
+      fakePlayer = new FakePlayer();
+      userNodePlayer = new UserNodePlayer(fakePlayer, defaultUserNodeActions);
+
+      emit = () => {
+        fakePlayer.emit({
+          ...basicPlayerState,
+          bobjects: [upstreamMessages[0]],
+          messageOrder: "receiveTime",
+          currentTime: upstreamMessages[0].receiveTime,
+          topics: [{ name: "/np_input", datatype: "std_msgs/Header" }],
+          datatypes: { foo: { fields: [] } },
+        });
+      };
+
+      expectFromSource = (messages, sourceIndex: number) => {
+        expect(messages).toEqual([
+          {
+            topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}0`,
+            receiveTime: upstreamMessages[0].receiveTime,
+            message: { key: sourceIndex },
+          },
+        ]);
+      };
+    });
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    const [userNode0, userNode1, userNode2] = new Array(3).fill().map((_, i) => {
+      return {
+        name: `${DEFAULT_WEBVIZ_NODE_PREFIX}0`,
+        sourceCode: `
+          export const inputs = ["/np_input"];
+          export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}0";
+          export default (): { key: number } => {
+            return { key: ${i} };
+          };
+        `,
+      };
+    });
+
+    it("creates node registrations when userNodes change", async () => {
+      const donePromises = setListenerHelper(userNodePlayer, 5);
+      userNodePlayer.setSubscriptions([{ topic: `${DEFAULT_WEBVIZ_NODE_PREFIX}0`, format: "parsedMessages" }]);
+
+      // New node 0, needs registration
+      await userNodePlayer.setUserNodes({ nodeId0: userNode0 });
+      emit();
+      const { messages: messages0 } = await donePromises[0];
+      expectFromSource(messages0, 0);
+      expect(callCount("transform")).toBe(1);
+
+      // New node 1, needs registration
+      await userNodePlayer.setUserNodes({ nodeId1: userNode1 });
+      emit();
+      const { messages: messages1 } = await donePromises[1];
+      expectFromSource(messages1, 1);
+      expect(callCount("transform")).toBe(2);
+
+      // Should use cached registration from 0
+      await userNodePlayer.setUserNodes({ nodeId0: userNode0 });
+      emit();
+      const { messages: messages2 } = await donePromises[2];
+      expectFromSource(messages2, 0);
+      expect(callCount("transform")).toBe(2); // Still 2
+
+      // Should use cached registration from 1
+      await userNodePlayer.setUserNodes({ nodeId0: userNode0 });
+      emit();
+      const { messages: messages3 } = await donePromises[3];
+      expectFromSource(messages3, 0);
+      expect(callCount("transform")).toBe(2); // Still 2
+
+      await userNodePlayer.setUserNodes({ nodeId2: userNode2 });
+      emit();
+      const { messages: messages4 } = await donePromises[4];
+      expectFromSource(messages4, 2);
+      expect(callCount("transform")).toBe(3);
+
+      // We'll still call registerNode and processMessage for every emit()
+      expect(callCount("registerNode")).toBe(5);
+      expect(callCount("addMessages")).toBe(5);
+      expect(callCount("processMessages")).toBe(5);
     });
   });
 });

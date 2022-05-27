@@ -6,17 +6,27 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import type { Time } from "rosbag";
+import type { Time, RosMsgDefinition } from "rosbag";
 
 import type { BlockCache } from "webviz-core/src/dataProviders/MemoryCacheDataProvider";
-import type { PerformanceMetadata } from "webviz-core/src/dataProviders/types";
+import type {
+  AverageThroughput,
+  DataProviderStall,
+  InitializationPerformanceMetadata,
+} from "webviz-core/src/dataProviders/types";
+import { type GlobalVariables } from "webviz-core/src/hooks/useGlobalVariables";
 import type { RosDatatypes } from "webviz-core/src/types/RosDatatypes";
 import type { Range } from "webviz-core/src/util/ranges";
 import type { TimestampMethod } from "webviz-core/src/util/time";
 
-// TODO move this to rosbag.js
-export type RosMsgDefinition = any[];
-export type MessageDefinitionsByTopic = { [topic: string]: string | RosMsgDefinition };
+export type RequireAuthAsk = {| type: "requireAuthAsk" |};
+export type RequireAuthReply = {| type: "requireAuthReply", data: string |};
+export type NotifyPlayerManagerData = RequireAuthAsk;
+export type NotifyPlayerManagerReplyData = RequireAuthReply;
+export type NotifyPlayerManager = (NotifyPlayerManagerData) => Promise<?NotifyPlayerManagerReplyData>;
+
+export type MessageDefinitionsByTopic = { [topic: string]: string };
+export type ParsedMessageDefinitionsByTopic = { [topic: string]: RosMsgDefinition[] };
 
 // A `Player` is a class that manages playback state. It manages subscriptions,
 // current time, which topics and datatypes are available, and so on.
@@ -61,6 +71,12 @@ export interface Player {
   // panels, so e.g. the Plot panel which might have a lot of data loaded would get cleared to just
   // a small backfilled amount of data. We should somehow make this more granular.
   requestBackfill(): void;
+
+  // Set the globalVariables for Players that support it.
+  // This is generally used to pass new globalVariables to the UserNodePlayer
+  setGlobalVariables(globalVariables: GlobalVariables): void;
+
+  setMessageOrder(order: TimestampMethod): void;
 }
 
 export type PlayerState = {|
@@ -100,7 +116,9 @@ export type PlayerStateActiveData = {|
   // and should be immediately following the previous array of messages that was emitted as part of
   // this state. If there is a discontinuity in messages, `lastSeekTime` should be different than
   // the previous state. Panels collect these messages using the `PanelAPI`.
-  messages: Message[],
+  messages: $ReadOnlyArray<Message>,
+  bobjects: $ReadOnlyArray<BobjectMessage>,
+  totalBytesReceived: number, // always-increasing
 
   // The current playback position, which will be shown in the playback bar. This time should be
   // equal to or later than the latest `receiveTime` in `messages`. Why not just use
@@ -151,7 +169,7 @@ export type PlayerStateActiveData = {|
 
   // Used for late-parsing of binary messages. Required to cover any topic for which binary data is
   // given to panels. (May be empty for players that only provide messages parsed into objects.)
-  messageDefinitionsByTopic: MessageDefinitionsByTopic,
+  parsedMessageDefinitionsByTopic: ParsedMessageDefinitionsByTopic,
 
   // Used for communicating potential issues that surface during playback.
   playerWarnings: PlayerWarnings,
@@ -171,6 +189,11 @@ export type Topic = {|
   // The number of messages present on the topic. Valid only for sources with a fixed number of
   // messages, such as bags.
   numMessages?: number,
+  // Whether the data can appear in the preloaded blocks. Authoritative if present -- this field
+  // will be set by the player to allow for optimizations in the PanelAPI and panels.
+  preloadable?: boolean,
+  // For our respective NodePlayers to publish their nodes' input topics.
+  inputTopics?: string[],
 |};
 
 // A ROS-like message.
@@ -186,11 +209,22 @@ export type TypedMessage<T> = $ReadOnly<{|
 export type Message = TypedMessage<any>;
 
 type RosSingularField = number | string | boolean | RosObject; // No time -- consider it a message.
-export type RosValue = RosSingularField | $ReadOnlyArray<RosSingularField> | Uint8Array | Int8Array | void;
+export type RosValue = RosSingularField | $ReadOnlyArray<RosSingularField> | Uint8Array | Int8Array | void | null;
 export type RosObject = $ReadOnly<{ [property: string]: RosValue }>;
 
-export type ReflectiveMessage = TypedMessage<RosObject>;
-export const cast = <T>(message: $ReadOnly<RosObject>): T => ((message: any): T);
+// Keeping 'Bobject' opaque here ensures that we're not mixing and matching
+// parsed messages with Bobjects.
+export opaque type Bobject = {};
+
+// Split from `TypedMessage` because $ReadOnly<> disagrees with the opaque Bobject type and mixed.
+export type OpaqueMessage<T> = $ReadOnly<{|
+  topic: string,
+  receiveTime: Time,
+  message: T,
+|}>;
+export type BobjectMessage = OpaqueMessage<Bobject>;
+export type ReflectiveMessage = OpaqueMessage<mixed>;
+export const cast = <T>(message: $ReadOnly<RosObject> | Bobject | mixed): T => ((message: any): T);
 
 // Contains different kinds of progress indications, mostly used in the playback bar.
 export type Progress = $ReadOnly<{|
@@ -212,6 +246,8 @@ export type Frame = {
   [topic: string]: Message[],
 };
 
+export type MessageFormat = "parsedMessages" | "bobjects";
+
 // Represents a subscription to a single topic, for use in `setSubscriptions`.
 // TODO(JP): Pull this into two types, one for the Player (which does not care about the
 // `requester`) and one for the Internals panel (which does).
@@ -231,7 +267,11 @@ export type SubscribePayload = {|
 
   // If all subscriptions for this topic have this flag set, and the topic is available in
   // PlayerState#Progress#blocks, the message won't be included in PlayerStateActiveData#messages.
-  onlyLoadInBlocks?: boolean,
+  // This is used by parsed-message subscribers to avoid parsing the messages at playback time when
+  // possible. Note: If there are other subscriptions without this flag set, the messages may still
+  // be delivered to the fallback subscriber.
+  preloadingFallback?: boolean,
+  format: MessageFormat,
 |};
 
 // Represents a single topic publisher, for use in `setPublishers`.
@@ -265,14 +305,19 @@ export const PlayerCapabilities = {
 // A metrics collector is an interface passed into a `Player`, which will get called when certain
 // events happen, so we can track those events in some metrics system.
 export interface PlayerMetricsCollectorInterface {
+  playerConstructed(): void;
   initialized(): void;
   play(speed: number): void;
   seek(time: Time): void;
   setSpeed(speed: number): void;
   pause(): void;
   close(): void;
+  setSubscriptions(subscriptions: SubscribePayload[]): void;
   recordBytesReceived(bytes: number): void;
-  recordPlaybackTime(time: Time): void;
-  recordDataProviderPerformance(metadata: PerformanceMetadata): void;
+  recordPlaybackTime(time: Time, stillLoadingData: boolean): void;
+  recordDataProviderPerformance(metadata: AverageThroughput): void;
+  recordUncachedRangeRequest(): void;
   recordTimeToFirstMsgs(): void;
+  recordDataProviderInitializePerformance(metadata: InitializationPerformanceMetadata): void;
+  recordDataProviderStall(metadata: DataProviderStall): void;
 }

@@ -7,12 +7,9 @@
 //  You may not use this file except in compliance with the License.
 import ArrowLeftIcon from "@mdi/svg/svg/arrow-left.svg";
 import CheckboxBlankOutlineIcon from "@mdi/svg/svg/checkbox-blank-outline.svg";
-import CheckboxOutlineIcon from "@mdi/svg/svg/checkbox-marked-circle-outline.svg";
 import CheckboxMarkedIcon from "@mdi/svg/svg/checkbox-marked.svg";
 import PlusIcon from "@mdi/svg/svg/plus.svg";
-import { some } from "lodash";
 import * as React from "react";
-import Dimensions from "react-container-dimensions";
 import { hot } from "react-hot-loader/root";
 import { useSelector, useDispatch } from "react-redux";
 import styled from "styled-components";
@@ -21,18 +18,18 @@ import uuid from "uuid";
 import { type Script } from "./script";
 import { setUserNodes as setUserNodesAction } from "webviz-core/src/actions/panels";
 import Button from "webviz-core/src/components/Button";
+import Dimensions from "webviz-core/src/components/Dimensions";
 import Flex from "webviz-core/src/components/Flex";
 import Icon from "webviz-core/src/components/Icon";
 import Item from "webviz-core/src/components/Menu/Item";
 import Panel from "webviz-core/src/components/Panel";
 import PanelToolbar from "webviz-core/src/components/PanelToolbar";
+import ResizableSplitFlex from "webviz-core/src/components/ResizableSplitFlex";
 import SpinningLoadingIcon from "webviz-core/src/components/SpinningLoadingIcon";
 import TextContent from "webviz-core/src/components/TextContent";
 import BottomBar from "webviz-core/src/panels/NodePlayground/BottomBar";
 import Playground from "webviz-core/src/panels/NodePlayground/playground-icon.svg";
 import Sidebar from "webviz-core/src/panels/NodePlayground/Sidebar";
-import { trustUserNode } from "webviz-core/src/players/UserNodePlayer/nodeSecurity";
-import type { UserNodeDiagnostics } from "webviz-core/src/reducers/userNodes";
 import type { UserNodes } from "webviz-core/src/types/panels";
 import { DEFAULT_WEBVIZ_NODE_PREFIX } from "webviz-core/src/util/globalConstants";
 import { colors } from "webviz-core/src/util/sharedStyleConstants";
@@ -44,12 +41,13 @@ const Editor = React.lazy(() =>
 const skeletonBody = `import { Input, Messages } from "ros";
 
 type Output = {};
+type GlobalVariables = { id: number };
 
 export const inputs = [];
 export const output = "${DEFAULT_WEBVIZ_NODE_PREFIX}";
 
 // Populate 'Input' with a parameter to properly type your inputs, e.g. 'Input<"/your_input_topic">'
-const publisher = (message: Input<>): Output => {
+const publisher = (message: Input<>, globalVars: GlobalVariables): Output => {
   return {};
 };
 
@@ -62,6 +60,7 @@ type Config = {|
   // Used only for storybook screenshot testing.
   additionalBackStackItems?: Script[],
   vimMode: boolean,
+  autoFormatOnSave?: boolean,
 |};
 
 type Props = {
@@ -83,47 +82,18 @@ const UnsavedDot = styled.div`
 
 // Exported for screenshot testing.
 export const NodePlaygroundSettings = ({ config, saveConfig }: Props) => (
-  <Item
-    icon={config.vimMode ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />}
-    onClick={() => saveConfig({ vimMode: !config.vimMode })}>
-    <span>Vim Mode</span>
-  </Item>
-);
-
-const SecurityBarWrapper = styled.div`
-  width: 100%;
-  height: 40px;
-  background-color: ${colors.REDL1};
-  display: flex;
-  justify-content: space-between;
-  padding: 8px;
-  align-items: center;
-  font-weight: bold;
-`;
-
-const TrustButton = styled.button`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 75px;
-  padding: 4px 8px;
-  vertical-align: middle;
-  font-weight: bold;
-  border: 2px solid ${colors.LIGHT1};
-`;
-
-const SecurityBar = ({ onClick }: { onClick: () => void }) => (
-  <SecurityBarWrapper>
-    <p>
-      Warning: This panel will execute user-defined code that is coming from a remote source. Make sure you trust it.
-    </p>
-    <TrustButton data-test="trust-user-scripts" onClick={onClick}>
-      Trust
-      <Icon small>
-        <CheckboxOutlineIcon />
-      </Icon>
-    </TrustButton>
-  </SecurityBarWrapper>
+  <>
+    <Item
+      icon={config.autoFormatOnSave ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />}
+      onClick={() => saveConfig({ autoFormatOnSave: !config.autoFormatOnSave })}>
+      <span>Auto-format on save</span>
+    </Item>
+    <Item
+      icon={config.vimMode ? <CheckboxMarkedIcon /> : <CheckboxBlankOutlineIcon />}
+      onClick={() => saveConfig({ vimMode: !config.vimMode })}>
+      <span>Vim Mode</span>
+    </Item>
+  </>
 );
 
 const SWelcomeScreen = styled.div`
@@ -175,17 +145,19 @@ const WelcomeScreen = ({
 
 function NodePlayground(props: Props) {
   const { config, saveConfig } = props;
-  const { selectedNodeId, editorForStorybook, vimMode } = config;
+  const { autoFormatOnSave, selectedNodeId, editorForStorybook, vimMode } = config;
 
   const [explorer, updateExplorer] = React.useState<Explorer>(null);
+  const [bottomBarSplitPercent, setBottomBarSplitPercent] = React.useState<number>(1);
 
-  const userNodes = useSelector((state) => state.panels.userNodes);
+  const bottomBarOpen = bottomBarSplitPercent < 0.95;
+  const toggleBottomBarOpen = React.useCallback(() => setBottomBarSplitPercent(bottomBarOpen ? 1 : 0.8), [
+    bottomBarOpen,
+  ]);
+
+  const userNodes = useSelector((state) => state.persistedState.panels.userNodes);
   const userNodeDiagnostics = useSelector((state) => state.userNodes.userNodeDiagnostics);
   const rosLib = useSelector((state) => state.userNodes.rosLib);
-  const needsUserTrust = useSelector((state) => {
-    const nodes: UserNodeDiagnostics[] = (Object.values(state.userNodes.userNodeDiagnostics): any);
-    return some(nodes, ({ trusted }) => typeof trusted === "boolean" && !trusted);
-  });
 
   const dispatch = useDispatch();
   const setUserNodes = React.useCallback((payload: UserNodes) => dispatch(setUserNodesAction(payload)), [dispatch]);
@@ -212,103 +184,58 @@ function NodePlayground(props: Props) {
     width: `${inputTitle.length + 4}ch`, // Width based on character count of title + padding
   };
 
-  React.useLayoutEffect(
-    () => {
-      if (selectedNode) {
-        const testItems = props.config.additionalBackStackItems || [];
-        setScriptBackStack([
-          { filePath: selectedNode.name, code: selectedNode.sourceCode, readOnly: false },
-          ...testItems,
-        ]);
+  React.useLayoutEffect(() => {
+    if (selectedNode) {
+      const testItems = props.config.additionalBackStackItems || [];
+      setScriptBackStack([
+        { filePath: selectedNode.name, code: selectedNode.sourceCode, readOnly: false },
+        ...testItems,
+      ]);
+    }
+  }, [props.config.additionalBackStackItems, selectedNode]);
+
+  const addNewNode = React.useCallback((_, code?: string) => {
+    const newNodeId = uuid.v4();
+    const sourceCode = code || skeletonBody;
+    // TODO: Add integration test for this flow.
+    setUserNodes({
+      [newNodeId]: {
+        sourceCode,
+        name: `${DEFAULT_WEBVIZ_NODE_PREFIX}${newNodeId.split("-")[0]}`,
+      },
+    });
+    saveConfig({ selectedNodeId: newNodeId });
+  }, [saveConfig, setUserNodes]);
+
+  const saveNode = React.useCallback((script) => {
+    if (!selectedNodeId || !script) {
+      return;
+    }
+    setUserNodes({ [selectedNodeId]: { ...selectedNode, sourceCode: script } });
+  }, [selectedNode, selectedNodeId, setUserNodes]);
+
+  const setScriptOverride = React.useCallback((script: Script, maxDepth?: number) => {
+    if (maxDepth && scriptBackStack.length >= maxDepth) {
+      setScriptBackStack([...scriptBackStack.slice(0, maxDepth - 1), script]);
+    } else {
+      setScriptBackStack([...scriptBackStack, script]);
+    }
+  }, [scriptBackStack]);
+
+  const goBack = React.useCallback(() => {
+    setScriptBackStack(scriptBackStack.slice(0, scriptBackStack.length - 1));
+  }, [scriptBackStack]);
+
+  const setScriptCode = React.useCallback((code: string) => {
+    // update code at top of backstack
+    const backStack = [...scriptBackStack];
+    if (backStack.length > 0) {
+      const script = backStack.pop();
+      if (!script.readOnly) {
+        setScriptBackStack([...backStack, { ...script, code }]);
       }
-    },
-    [props.config.additionalBackStackItems, selectedNode]
-  );
-
-  // UX nicety so that the user can see which nodes need to be verified.
-  React.useLayoutEffect(
-    () => {
-      if (needsUserTrust) {
-        updateExplorer("nodes");
-      }
-    },
-    [needsUserTrust]
-  );
-
-  const addNewNode = React.useCallback(
-    (_, code?: string) => {
-      const newNodeId = uuid.v4();
-      const sourceCode = code || skeletonBody;
-      // TODO: Add integration test for this flow.
-      trustUserNode({ id: newNodeId, sourceCode }).then(() => {
-        setUserNodes({
-          [newNodeId]: {
-            sourceCode,
-            name: `${DEFAULT_WEBVIZ_NODE_PREFIX}${newNodeId.split("-")[0]}`,
-          },
-        });
-        saveConfig({ selectedNodeId: newNodeId });
-      });
-    },
-    [saveConfig, setUserNodes]
-  );
-
-  const trustSelectedNode = React.useCallback(
-    () => {
-      if (!selectedNodeId || !selectedNode) {
-        return;
-      }
-      trustUserNode({ id: selectedNodeId, sourceCode: selectedNode.sourceCode }).then(() => {
-        // no-op in order to trigger the useUserNodes hook.
-        setUserNodes({});
-      });
-    },
-    [selectedNode, selectedNodeId, setUserNodes]
-  );
-
-  const saveNode = React.useCallback(
-    (script) => {
-      if (!selectedNodeId || !script) {
-        return;
-      }
-      trustUserNode({ id: selectedNodeId, sourceCode: script }).then(() => {
-        setUserNodes({ [selectedNodeId]: { ...selectedNode, sourceCode: script } });
-      });
-    },
-    [selectedNode, selectedNodeId, setUserNodes]
-  );
-
-  const setScriptOverride = React.useCallback(
-    (script: Script, maxDepth?: number) => {
-      if (maxDepth && scriptBackStack.length >= maxDepth) {
-        setScriptBackStack([...scriptBackStack.slice(0, maxDepth - 1), script]);
-      } else {
-        setScriptBackStack([...scriptBackStack, script]);
-      }
-    },
-    [scriptBackStack]
-  );
-
-  const goBack = React.useCallback(
-    () => {
-      setScriptBackStack(scriptBackStack.slice(0, scriptBackStack.length - 1));
-    },
-    [scriptBackStack]
-  );
-
-  const setScriptCode = React.useCallback(
-    (code: string) => {
-      // update code at top of backstack
-      const backStack = [...scriptBackStack];
-      if (backStack.length > 0) {
-        const script = backStack.pop();
-        if (!script.readOnly) {
-          setScriptBackStack([...backStack, { ...script, code }]);
-        }
-      }
-    },
-    [scriptBackStack]
-  );
+    }
+  }, [scriptBackStack]);
 
   return (
     <Dimensions>
@@ -334,7 +261,6 @@ function NodePlayground(props: Props) {
               }}
               selectedNodeId={selectedNodeId}
               userNodes={userNodes}
-              needsUserTrust={needsUserTrust}
               userNodeDiagnostics={userNodeDiagnostics}
               script={currentScript}
               setScriptOverride={setScriptOverride}
@@ -383,49 +309,54 @@ function NodePlayground(props: Props) {
                 </Icon>
               </Flex>
 
-              {userNodeDiagnostics[selectedNodeId] &&
-                typeof userNodeDiagnostics[selectedNodeId].trusted === "boolean" &&
-                !userNodeDiagnostics[selectedNodeId].trusted && <SecurityBar onClick={trustSelectedNode} />}
               <Flex col style={{ flexGrow: 1, position: "relative" }}>
                 {!selectedNodeId && <WelcomeScreen addNewNode={addNewNode} updateExplorer={updateExplorer} />}
-                <div
-                  key={`${height}x${width}`}
-                  data-nativeundoredo="true"
-                  style={{
-                    height: "100%",
-                    width: "100%",
-                    display: selectedNodeId
-                      ? "initial"
-                      : "none" /* Ensures the monaco-editor starts loading before the user opens it */,
-                  }}>
-                  <React.Suspense
-                    fallback={
-                      <Flex center style={{ width: "100%", height: "100%" }}>
-                        <Icon large>
-                          <SpinningLoadingIcon />
-                        </Icon>
-                      </Flex>
-                    }>
-                    {editorForStorybook || (
-                      <Editor
-                        script={currentScript}
-                        setScriptCode={setScriptCode}
-                        setScriptOverride={setScriptOverride}
-                        vimMode={vimMode}
-                        rosLib={rosLib}
-                        resizeKey={`${width}-${height}-${explorer || "none"}-${selectedNodeId || "none"}`}
-                        save={saveNode}
-                      />
-                    )}
-                  </React.Suspense>
-                </div>
-                <BottomBar
-                  nodeId={selectedNodeId}
-                  isSaved={isNodeSaved}
-                  save={() => saveNode(currentScript?.code)}
-                  diagnostics={selectedNodeDiagnostics}
-                  logs={selectedNodeLogs}
-                />
+
+                <ResizableSplitFlex column splitPercent={bottomBarSplitPercent} onChange={setBottomBarSplitPercent}>
+                  <div
+                    key={`${height}x${width}`}
+                    data-nativeundoredo="true"
+                    style={{
+                      height: "100%",
+                      width: "100%",
+                      display: selectedNodeId
+                        ? "initial"
+                        : "none" /* Ensures the monaco-editor starts loading before the user opens it */,
+                    }}>
+                    <React.Suspense
+                      fallback={
+                        <Flex center style={{ width: "100%", height: "100%" }}>
+                          <Icon large>
+                            <SpinningLoadingIcon />
+                          </Icon>
+                        </Flex>
+                      }>
+                      {editorForStorybook || (
+                        <Editor
+                          autoFormatOnSave={!!autoFormatOnSave}
+                          script={currentScript}
+                          setScriptCode={setScriptCode}
+                          setScriptOverride={setScriptOverride}
+                          vimMode={vimMode}
+                          rosLib={rosLib}
+                          resizeKey={`${width}-${height}-${explorer || "none"}-${selectedNodeId || "none"}`}
+                          save={saveNode}
+                        />
+                      )}
+                    </React.Suspense>
+                  </div>
+                  <div style={{ width: "100%", height: "100%", minHeight: "28px" }}>
+                    <BottomBar
+                      nodeId={selectedNodeId}
+                      isSaved={isNodeSaved}
+                      save={() => saveNode(currentScript?.code)}
+                      diagnostics={selectedNodeDiagnostics}
+                      logs={selectedNodeLogs}
+                      open={bottomBarOpen}
+                      toggleBottomBarOpen={toggleBottomBarOpen}
+                    />
+                  </div>
+                </ResizableSplitFlex>
               </Flex>
             </Flex>
           </Flex>
@@ -436,6 +367,6 @@ function NodePlayground(props: Props) {
 }
 
 NodePlayground.panelType = "NodePlayground";
-NodePlayground.defaultConfig = { selectedNodeId: undefined, vimMode: false };
+NodePlayground.defaultConfig = { selectedNodeId: undefined, vimMode: false, autoFormatOnSave: true };
 
 export default hot(Panel<Config>(NodePlayground));

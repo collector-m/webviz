@@ -7,6 +7,9 @@
 //  You may not use this file except in compliance with the License.
 
 import * as time from "./time";
+import { cast } from "webviz-core/src/players/types";
+import type { BinaryTime } from "webviz-core/src/types/BinaryMessages";
+import { deepParse, wrapJsObject, compareBinaryTimes } from "webviz-core/src/util/binaryObjects";
 
 const { fromSecondStamp } = time;
 describe("time.toDate & time.fromDate", () => {
@@ -56,43 +59,6 @@ describe("percentOf", () => {
     expect(time.percentOf(start, end, { sec: 0, nsec: 1e9 })).toEqual(10);
     expect(time.percentOf(start, end, { sec: 0, nsec: 1e7 })).toEqual(0.1);
     expect(time.percentOf(start, end, { sec: -1, nsec: 0 })).toEqual(-10);
-  });
-});
-
-describe("time.formatDuration", () => {
-  it("uses milliseconds and pads values with zeros", () => {
-    expect(time.formatDuration({ sec: 0, nsec: 0 })).toEqual("0:00:00.000");
-    expect(time.formatDuration({ sec: 0, nsec: 999 })).toEqual("0:00:00.000");
-    expect(time.formatDuration({ sec: 0, nsec: 1000 })).toEqual("0:00:00.000");
-    expect(time.formatDuration({ sec: 0, nsec: 499999 })).toEqual("0:00:00.000");
-    expect(time.formatDuration({ sec: 0, nsec: 500000 })).toEqual("0:00:00.001");
-    expect(time.formatDuration({ sec: 0, nsec: 999e3 })).toEqual("0:00:00.001");
-    expect(time.formatDuration({ sec: 0, nsec: 999e6 })).toEqual("0:00:00.999");
-    expect(time.formatDuration({ sec: 1, nsec: 999e6 })).toEqual("0:00:01.999");
-    expect(time.formatDuration({ sec: 1, nsec: 999999e3 })).toEqual("0:00:02.000");
-    expect(time.formatDuration({ sec: 1, nsec: 999999999 })).toEqual("0:00:02.000");
-    expect(time.formatDuration({ sec: 3 * 60 * 60 + 2 * 60 + 1, nsec: 999e6 })).toEqual("3:02:01.999");
-    expect(time.formatDuration({ sec: 3 * 60 * 60 + 59 * 60 + 59, nsec: 99e6 })).toEqual("3:59:59.099");
-    expect(time.formatDuration({ sec: -1, nsec: 0 })).toEqual("-0:00:01.000");
-    expect(time.formatDuration({ sec: 0, nsec: -1000000 })).toEqual("-0:00:00.001");
-  });
-});
-
-describe("time.formatDate", () => {
-  it("formats date based on provided timezone", () => {
-    expect(time.formatDate({ sec: 1, nsec: 0 }, "Asia/Bangkok")).toBe("1970-01-01");
-    expect(time.formatDate({ sec: 1, nsec: 1 }, "Australia/Currie")).toBe("1970-01-01");
-    expect(time.formatDate({ sec: 1000000, nsec: 0 }, "Pacific/Midway")).toBe("1970-01-12");
-    expect(time.formatDate({ sec: 1100000, nsec: 1000000000 }, "America/Los_Angeles")).toBe("1970-01-13");
-  });
-});
-
-describe("time.formatTime", () => {
-  it("formats time based on provided timezone", () => {
-    expect(time.formatTime({ sec: 1, nsec: 0 }, "America/Phoenix")).toBe("5:00:01.000 PM MST");
-    expect(time.formatTime({ sec: 1, nsec: 1 }, "America/Detroit")).toBe("7:00:01.000 PM EST");
-    expect(time.formatTime({ sec: 1, nsec: 999999999 }, "America/Phoenix")).toBe("5:00:01.999 PM MST");
-    expect(time.formatTime({ sec: 1, nsec: 1000000000 }, "America/Los_Angeles")).toBe("4:00:02.000 PM PST");
   });
 });
 
@@ -241,42 +207,81 @@ describe("time.clampTime", () => {
   });
 });
 
+describe("time.isTimeInRangeInclusive", () => {
+  const start = { sec: 0, nsec: 100 };
+  const end = { sec: 100, nsec: 100 };
+  it("returns whether time is between start and end, inclusive", () => {
+    expect(time.isTimeInRangeInclusive(start, start, end)).toEqual(true);
+    expect(time.isTimeInRangeInclusive(end, start, end)).toEqual(true);
+    expect(time.isTimeInRangeInclusive({ sec: 50, nsec: 50 }, start, end)).toEqual(true);
+    expect(time.isTimeInRangeInclusive({ sec: 0, nsec: 99 }, start, end)).toEqual(false);
+    expect(time.isTimeInRangeInclusive({ sec: 100, nsec: 101 }, start, end)).toEqual(false);
+  });
+});
+
 describe("time.parseRosTimeStr", () => {
-  it("returns null if the input string is formatted incorrectly", () => {
-    expect(time.parseRosTimeStr("")).toEqual(null);
-    expect(time.parseRosTimeStr(".12121")).toEqual(null);
-    expect(time.parseRosTimeStr(".")).toEqual(null);
+  it("returns undefined if the input string is formatted incorrectly", () => {
+    expect(time.parseRosTimeStr(null)).toEqual(undefined);
+    expect(time.parseRosTimeStr("")).toEqual(undefined);
+    expect(time.parseRosTimeStr(".12121")).toEqual(undefined);
+    expect(time.parseRosTimeStr(".")).toEqual(undefined);
+    expect(time.parseRosTimeStr("abc")).toEqual(undefined);
   });
 
   it("returns the correct time", () => {
     expect(time.parseRosTimeStr("12121.")).toEqual({ sec: 12121, nsec: 0 });
     expect(time.parseRosTimeStr("1")).toEqual({ sec: 1, nsec: 0 });
     expect(time.parseRosTimeStr("1.")).toEqual({ sec: 1, nsec: 0 });
-    expect(time.parseRosTimeStr("1.12")).toEqual({ sec: 1, nsec: 12 });
-    expect(time.parseRosTimeStr("100.100")).toEqual({ sec: 100, nsec: 100 });
+    expect(time.parseRosTimeStr("1.12")).toEqual({ sec: 1, nsec: 0.12e9 });
+    expect(time.parseRosTimeStr("100.100")).toEqual({ sec: 100, nsec: 0.1e9 });
     expect(time.parseRosTimeStr("100")).toEqual({ sec: 100, nsec: 0 });
+    // Full nanosecond timestamp
+    expect(time.parseRosTimeStr("1.123456789")).toEqual({ sec: 1, nsec: 0.123456789e9 });
+    // Too much precision
+    expect(time.parseRosTimeStr("1.0123456789")).toEqual({ sec: 1, nsec: 0.012345679e9 });
+    // Too much precision, round seconds up.
+    expect(time.parseRosTimeStr("1.999999999999")).toEqual({ sec: 2, nsec: 0 });
+
+    expect(time.parseRosTimeStr("123456.000000000")).toEqual({ sec: 123456, nsec: 0 });
+    expect(time.parseRosTimeStr("123456.100000000")).toEqual({ sec: 123456, nsec: 100000000 });
+    expect(time.parseRosTimeStr("123456.123456789")).toEqual({ sec: 123456, nsec: 123456789 });
   });
 });
 
-describe("time.parseTimeStr", () => {
-  // create the time string input from current time zone so the test results are always consistent
-  // sample output: 2018-07-23 2:45:20.317 PM PDT
-  function getCombinedTimeStr(timestamp) {
-    return `${time.formatDate(timestamp)} ${time.formatTime(timestamp)}`;
-  }
+describe("time.getSeekToTime", () => {
+  it("returns the correct seek type and value", () => {
+    expect(time.getSeekToTime("?seek-to=1609746092535")).toEqual({
+      time: { nsec: 535000000, sec: 1609746092 },
+      type: "absolute",
+    });
+    expect(time.getSeekToTime("?seek-to=1609746092.534620523")).toEqual({
+      time: { nsec: 534620523, sec: 1609746092 },
+      type: "absolute",
+    });
+    expect(time.getSeekToTime("?seek-to=1609746092.")).toEqual({
+      time: { nsec: 0, sec: 1609746092 },
+      type: "absolute",
+    });
+    expect(time.getSeekToTime("?seek-to=1609746092.000000002")).toEqual({
+      time: { nsec: 2, sec: 1609746092 },
+      type: "absolute",
+    });
 
-  it("returns null if the input string is formatted incorrectly", () => {
-    expect(time.parseTimeStr("")).toEqual(null);
-    expect(time.parseTimeStr("018-07")).toEqual(null);
-    expect(time.parseTimeStr("0")).toEqual(null);
+    expect(time.getSeekToTime("?seek-by=101")).toEqual({ startOffset: { nsec: 101000000, sec: 0 }, type: "relative" });
+    expect(time.getSeekToTime("?seek-fraction=0.3")).toEqual({ fraction: 0.3, type: "fraction" });
   });
 
-  it("returns the correct time", () => {
-    const timeStr = getCombinedTimeStr({ sec: 1532382320, nsec: 317124567 });
-    expect(time.parseTimeStr(timeStr)).toEqual({
-      nsec: 317000000, // losing some accuracy when converting back
-      sec: 1532382320,
-    });
+  it("returns the default if the seek value is invalid", () => {
+    const defaultResult = { startOffset: { sec: 0, nsec: 99000000 }, type: "relative" };
+    expect(time.getSeekToTime("?seek-to=-1609746092.534620523")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-to=-534620523")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-to=.534620523")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-by=-100")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-fraction=-0.1")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-to=invalid")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-by=abc")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-fraction=.")).toEqual(defaultResult);
+    expect(time.getSeekToTime("?seek-fraction=.d")).toEqual(defaultResult);
   });
 });
 
@@ -303,5 +308,96 @@ describe("time.getTimestampForMessage", () => {
       time.getTimestampForMessage({ ...messageBase, message: { header: { stamp: { sec: 123 } } } }, "headerStamp")
     ).toEqual(undefined);
     expect(time.getTimestampForMessage({ ...messageBase, message: { header: {} } }, "headerStamp")).toEqual(undefined);
+  });
+});
+
+describe("time.rosTimeToUrlTime", () => {
+  it("converts ros time to SEC.NSEC", () => {
+    expect(time.rosTimeToUrlTime({ sec: 2, nsec: 1 })).toBe("2.000000001");
+    expect(time.rosTimeToUrlTime({ sec: 1609746092, nsec: 53462052 })).toBe("1609746092.053462052");
+  });
+});
+
+describe("time.compareBinaryTimes", () => {
+  it("properly orders a list of times", () => {
+    const times = [{ sec: 1, nsec: 1 }, { sec: 0, nsec: 0 }, { sec: 1, nsec: 0 }, { sec: 0, nsec: 1 }];
+    const binaryTimes = times.map((t) => cast<BinaryTime>(wrapJsObject({}, "time", t)));
+    expect(binaryTimes.sort(compareBinaryTimes).map(deepParse)).toEqual([
+      { sec: 0, nsec: 0 },
+      { sec: 0, nsec: 1 },
+      { sec: 1, nsec: 0 },
+      { sec: 1, nsec: 1 },
+    ]);
+  });
+});
+
+describe("time.interpolateTimes", () => {
+  it("works for zero-duration spans", () => {
+    const t = { sec: 0, nsec: 0 };
+    expect(time.interpolateTimes(t, t, 0)).toEqual(t);
+    expect(time.interpolateTimes(t, t, -1)).toEqual(t);
+    expect(time.interpolateTimes(t, t, 1)).toEqual(t);
+  });
+
+  it("works for non-zero spans", () => {
+    const start = { sec: 0, nsec: 0 };
+    const end = { sec: 5, nsec: 0 };
+    expect(time.interpolateTimes(start, end, 0)).toEqual(start);
+    expect(time.interpolateTimes(start, end, 1)).toEqual(end);
+    expect(time.interpolateTimes(start, end, 0.5)).toEqual({ sec: 2, nsec: 5e8 });
+    expect(time.interpolateTimes(start, end, 2)).toEqual({ sec: 10, nsec: 0 });
+  });
+});
+
+describe("time.getSeekTimeFromSpec", () => {
+  it("returns absolute seek times", () => {
+    expect(
+      time.getSeekTimeFromSpec(
+        { type: "absolute", time: { sec: 12, nsec: 0 } },
+        { sec: 10, nsec: 0 },
+        { sec: 15, nsec: 0 }
+      )
+    ).toEqual({ sec: 12, nsec: 0 });
+  });
+
+  it("adds relative offsets", () => {
+    expect(
+      time.getSeekTimeFromSpec(
+        { type: "relative", startOffset: { sec: 1, nsec: 0 } },
+        { sec: 10, nsec: 0 },
+        { sec: 15, nsec: 0 }
+      )
+    ).toEqual({ sec: 11, nsec: 0 });
+  });
+
+  it("supports negative relative offsets", () => {
+    expect(
+      time.getSeekTimeFromSpec(
+        { type: "relative", startOffset: { sec: -1, nsec: 5e8 } }, // minus half a second
+        { sec: 10, nsec: 0 },
+        { sec: 15, nsec: 0 }
+      )
+    ).toEqual({ sec: 14, nsec: 5e8 });
+  });
+
+  it("calculates fractional times", () => {
+    expect(
+      time.getSeekTimeFromSpec({ type: "fraction", fraction: 0.6 }, { sec: 10, nsec: 0 }, { sec: 15, nsec: 0 })
+    ).toEqual({ sec: 13, nsec: 0 });
+  });
+
+  it("clamps seek times to the playback range", () => {
+    const start = { sec: 10, nsec: 0 };
+    const end = { sec: 15, nsec: 0 };
+    expect(time.getSeekTimeFromSpec({ type: "absolute", time: { sec: 6, nsec: 0 } }, start, end)).toEqual(start);
+    expect(time.getSeekTimeFromSpec({ type: "absolute", time: { sec: 16, nsec: 0 } }, start, end)).toEqual(end);
+
+    expect(time.getSeekTimeFromSpec({ type: "relative", startOffset: { sec: -6, nsec: 0 } }, start, end)).toEqual(
+      start
+    );
+    expect(time.getSeekTimeFromSpec({ type: "relative", startOffset: { sec: 6, nsec: 0 } }, start, end)).toEqual(end);
+
+    expect(time.getSeekTimeFromSpec({ type: "fraction", fraction: -1 }, start, end)).toEqual(start);
+    expect(time.getSeekTimeFromSpec({ type: "fraction", fraction: 2 }, start, end)).toEqual(end);
   });
 });

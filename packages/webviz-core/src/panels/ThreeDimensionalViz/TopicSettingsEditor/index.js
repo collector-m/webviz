@@ -11,7 +11,9 @@ import React, { useCallback, type ComponentType } from "react";
 import { hot } from "react-hot-loader/root";
 
 import { SLabel, SDescription, SInput } from "./common";
+import IconMarkerSettingsEditor from "./IconMarkerSettingsEditor";
 import LaserScanSettingsEditor from "./LaserScanSettingsEditor";
+import MarkerOverrideColorSettingsEditor from "./MarkerOverrideColorSettingsEditor";
 import MarkerSettingsEditor from "./MarkerSettingsEditor";
 import PointCloudSettingsEditor from "./PointCloudSettingsEditor";
 import PoseSettingsEditor from "./PoseSettingsEditor";
@@ -20,12 +22,18 @@ import ErrorBoundary from "webviz-core/src/components/ErrorBoundary";
 import Flex from "webviz-core/src/components/Flex";
 import { Select, Option } from "webviz-core/src/components/Select";
 import { getGlobalHooks } from "webviz-core/src/loadWebviz";
+import type { StructuralDatatypes } from "webviz-core/src/panels/ThreeDimensionalViz/utils/datatypes";
 import type { Topic } from "webviz-core/src/players/types";
 import {
-  POINT_CLOUD_DATATYPE,
-  POSE_STAMPED_DATATYPE,
-  LASER_SCAN_DATATYPE,
-  WEBVIZ_MARKER_DATATYPE,
+  SENSOR_MSGS$POINT_CLOUD_2,
+  GEOMETRY_MSGS$POSE_STAMPED,
+  SENSOR_MSGS$LASER_SCAN,
+  VISUALIZATION_MSGS$WEBVIZ_MARKER,
+  WEBVIZ_ICON_MSGS$WEBVIZ_3D_ICON_ARRAY,
+  VISUALIZATION_MSGS$WEBVIZ_MARKER_ARRAY,
+  VISUALIZATION_MSGS$MARKER,
+  VISUALIZATION_MSGS$MARKER_ARRAY,
+  NAV_MSGS$PATH,
 } from "webviz-core/src/util/globalConstants";
 
 export const LINED_CONVEX_HULL_RENDERING_SETTING = "LinedConvexHull";
@@ -118,25 +126,34 @@ export type TopicSettingsEditorProps<Msg, Settings: {}> = {|
   onSettingsChange: ({} | (({}) => {})) => void,
 |};
 
-export function topicSettingsEditorForDatatype(datatype: string): ?ComponentType<TopicSettingsEditorProps<any, any>> {
+export function topicSettingsEditorForDatatype(
+  datatype: string,
+  structuralDatatypes: StructuralDatatypes
+): ?ComponentType<TopicSettingsEditorProps<any, any>> {
   const editors = {
-    [POINT_CLOUD_DATATYPE]: PointCloudSettingsEditor,
-    [POSE_STAMPED_DATATYPE]: PoseSettingsEditor,
-    [LASER_SCAN_DATATYPE]: LaserScanSettingsEditor,
-    [WEBVIZ_MARKER_DATATYPE]: MarkerSettingsEditor,
-    "visualization_msgs/Marker": MarkerSettingsEditor,
-    "visualization_msgs/MarkerArray": MarkerSettingsEditor,
+    [SENSOR_MSGS$POINT_CLOUD_2]: PointCloudSettingsEditor,
+    [GEOMETRY_MSGS$POSE_STAMPED]: PoseSettingsEditor,
+    [SENSOR_MSGS$LASER_SCAN]: LaserScanSettingsEditor,
+    [VISUALIZATION_MSGS$WEBVIZ_MARKER]: MarkerSettingsEditor,
+    [VISUALIZATION_MSGS$WEBVIZ_MARKER_ARRAY]: MarkerSettingsEditor,
+    [VISUALIZATION_MSGS$MARKER]: MarkerSettingsEditor,
+    [VISUALIZATION_MSGS$MARKER_ARRAY]: MarkerSettingsEditor,
+    [WEBVIZ_ICON_MSGS$WEBVIZ_3D_ICON_ARRAY]: IconMarkerSettingsEditor,
+    [NAV_MSGS$PATH]: MarkerOverrideColorSettingsEditor,
     ...getGlobalHooks().perPanelHooks().ThreeDimensionalViz.topicSettingsEditors,
   };
-  return editors[datatype];
+  return editors[datatype] ?? editors[structuralDatatypes[datatype]];
 }
 
-export function canEditDatatype(datatype: string): boolean {
-  return topicSettingsEditorForDatatype(datatype) != null;
+export function canEditDatatype(datatype: string, structuralDatatypes: StructuralDatatypes): boolean {
+  return topicSettingsEditorForDatatype(datatype, structuralDatatypes) != null;
 }
 
-export function canEditNamespaceOverrideColorDatatype(datatype: string): boolean {
-  const editor = topicSettingsEditorForDatatype(datatype);
+export function canEditNamespaceOverrideColorDatatype(
+  datatype: string,
+  structuralDatatypes: StructuralDatatypes
+): boolean {
+  const editor = topicSettingsEditorForDatatype(datatype, structuralDatatypes);
   // $FlowFixMe added static field `canEditNamespaceOverrideColor` to the React component
   return !!(editor && editor.canEditNamespaceOverrideColor);
 }
@@ -145,6 +162,7 @@ type Props = {|
   topic: Topic,
   message: any,
   settings: ?{},
+  structuralDatatypes: StructuralDatatypes,
   onSettingsChange: ({}) => void,
 |};
 
@@ -152,16 +170,14 @@ const TopicSettingsEditor = React.memo<Props>(function TopicSettingsEditor({
   topic,
   message,
   settings,
+  structuralDatatypes,
   onSettingsChange,
 }: Props) {
-  const onFieldChange = useCallback(
-    (fieldName: string, value: any) => {
-      onSettingsChange((newSettings) => ({ ...newSettings, [fieldName]: value }));
-    },
-    [onSettingsChange]
-  );
+  const onFieldChange = useCallback((fieldName: string, value: any) => {
+    onSettingsChange((newSettings) => ({ ...newSettings, [fieldName]: value }));
+  }, [onSettingsChange]);
 
-  const Editor = topicSettingsEditorForDatatype(topic.datatype);
+  const Editor = topicSettingsEditorForDatatype(topic.datatype, structuralDatatypes);
   if (!Editor) {
     throw new Error(`No topic settings editor available for ${topic.datatype}`);
   }

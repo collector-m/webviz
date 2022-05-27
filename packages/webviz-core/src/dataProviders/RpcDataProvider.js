@@ -8,15 +8,16 @@
 
 import { Time } from "rosbag";
 
-import { setupReceiveReportErrorHandler } from "webviz-core/src//util/RpcUtils";
-import {
-  type DataProviderDescriptor,
-  type ExtensionPoint,
-  type InitializationResult,
-  type DataProvider,
+import type {
+  DataProviderDescriptor,
+  ExtensionPoint,
+  GetMessagesResult,
+  GetMessagesTopics,
+  InitializationResult,
+  DataProvider,
 } from "webviz-core/src/dataProviders/types";
-import type { Message } from "webviz-core/src/players/types";
 import Rpc from "webviz-core/src/util/Rpc";
+import { setupMainThreadRpc } from "webviz-core/src/util/RpcMainThreadUtils";
 
 // Looks a bit like a regular `DataProvider`, but is not intended to be used directly in a
 // DataProviderDescriptor tree, but rather in another DataProvider where we instantiate an Rpc, e.g.
@@ -29,7 +30,7 @@ export default class RpcDataProvider implements DataProvider {
 
   constructor(rpc: Rpc, children: DataProviderDescriptor[]) {
     this._rpc = rpc;
-    setupReceiveReportErrorHandler(this._rpc);
+    setupMainThreadRpc(this._rpc);
     if (children.length !== 1) {
       throw new Error(`RpcDataProvider requires exactly 1 child, but received ${children.length}`);
     }
@@ -38,7 +39,7 @@ export default class RpcDataProvider implements DataProvider {
 
   initialize(extensionPoint: ExtensionPoint): Promise<InitializationResult> {
     if (extensionPoint) {
-      const { progressCallback, reportMetadataCallback } = extensionPoint;
+      const { progressCallback, reportMetadataCallback, notifyPlayerManager } = extensionPoint;
 
       this._rpc.receive("extensionPointCallback", ({ type, data }) => {
         switch (type) {
@@ -48,6 +49,9 @@ export default class RpcDataProvider implements DataProvider {
           case "reportMetadataCallback":
             reportMetadataCallback(data);
             break;
+          case "notifyPlayerManager": {
+            return notifyPlayerManager(data);
+          }
           default:
             throw new Error(`Unsupported extension point type in RpcDataProvider: ${type}`);
         }
@@ -56,8 +60,16 @@ export default class RpcDataProvider implements DataProvider {
     return this._rpc.send("initialize", { childDescriptor: this._childDescriptor });
   }
 
-  async getMessages(start: Time, end: Time, topics: string[]): Promise<Message[]> {
-    return (await this._rpc.send("getMessages", { start, end, topics })).messages;
+  async getMessages(start: Time, end: Time, topics: GetMessagesTopics): Promise<GetMessagesResult> {
+    if (topics.bobjects || topics.parsedMessages) {
+      throw new Error("RpcDataProvider only supports rosBinaryMessages");
+    }
+    return {
+      rosBinaryMessages: (await this._rpc.send("getMessages", { start, end, topics: topics.rosBinaryMessages }))
+        .messages,
+      bobjects: undefined,
+      parsedMessages: undefined,
+    };
   }
 
   close(): Promise<void> {

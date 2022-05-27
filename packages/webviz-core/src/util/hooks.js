@@ -36,6 +36,36 @@ export function useForceUpdate() {
   return update;
 }
 
+// Logs when shallow equals fails. Useful for debugging memoization. Please do not use in production.
+export function DEBUGShallowEquals(name: string, item: {}) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("Cannot use DEBUGShallowEquals in production");
+  }
+  const previous = usePreviousValue(item);
+  let hasBeenTriggered = false;
+  Object.keys(item).forEach((key) => {
+    if (previous && item[key] !== previous[key]) {
+      if (!hasBeenTriggered) {
+        console.log(`shallowequals on ${name} failed.`);
+        hasBeenTriggered = true;
+      }
+      console.log(`${key} value changed. isEqual: ${String(isEqual(previous[key], item[key]))}`, {
+        previous: previous[key],
+        new: item[key],
+      });
+    }
+  });
+}
+
+// Returns a function that, when called, returns the value passed in. This doesn't sound very useful, but in this
+// case the function will never change identity, so it's useful for passing to callbacks or children without triggering
+// rerenders.
+export function useGetCurrentValue<T>(value: T): () => T {
+  const ref = useRef(value);
+  ref.current = value;
+  return useCallback(() => ref.current, []);
+}
+
 // Return initiallyTrue the first time, and again if any of the given deps have changed.
 export function useChangeDetector(deps: any[], initiallyTrue: boolean) {
   const ref = useRef(initiallyTrue ? undefined : deps);
@@ -113,6 +143,29 @@ export function useShouldNotChangeOften<T>(value: T, warn: () => void): T {
   return value;
 }
 
+// Calls a callback after a delay if the component hasn't unmounted in the meantime.
+export function useDelayedEffect(effectCallback: () => ?() => void, delayMs?: number = 0) {
+  React.useEffect(() => {
+    let canceled = false;
+    let maybeCleanupFn = null;
+
+    // Self-executing function for the async/await sugar
+    (async () => {
+      await new Promise((r) => setTimeout(r, delayMs));
+      if (!canceled) {
+        maybeCleanupFn = effectCallback();
+      }
+    })();
+
+    return () => {
+      canceled = true;
+      if (maybeCleanupFn) {
+        maybeCleanupFn();
+      }
+    };
+  }, [delayMs, effectCallback]);
+}
+
 type SelectableContextHandle<T> = {
   currentValue(): T,
   publish(value: T): void,
@@ -177,6 +230,8 @@ function isBailout(value: mixed): boolean %checks {
   return (value === useContextSelector.BAILOUT /*:: || value instanceof Symbol */);
 }
 
+export type MemoResolver<T> = (a: T | BailoutToken, b: ?(T | BailoutToken)) => boolean;
+
 // `useContextSelector(context, selector)` behaves like `selector(useContext(context))`, but
 // only triggers a re-render when the selected value actually changes.
 //
@@ -185,7 +240,13 @@ function isBailout(value: mixed): boolean %checks {
 //
 // `useContextSelector.BAILOUT` can be returned from the selector as a special sentinel that indicates
 // no update should occur. (Returning BAILOUT from the first call to selector is not allowed.)
-export function useContextSelector<T, U>(context: SelectableContext<T>, selector: (T) => U | BailoutToken): U {
+export function useContextSelector<T, U>(
+  context: SelectableContext<T>,
+  selector: (T) => U | BailoutToken,
+  options?: ?{| memoResolver: MemoResolver<U> |}
+): U {
+  const memoResolver = options?.memoResolver;
+
   // eslint-disable-next-line no-underscore-dangle
   const handle = useContext(context._ctx);
   if (!handle) {
@@ -215,25 +276,25 @@ export function useContextSelector<T, U>(context: SelectableContext<T>, selector
   });
 
   // Subscribe to context updates, and setSelectedValue() only when the selected value changes.
-  useLayoutEffect(
-    () => {
-      const sub = (newValue) => {
-        const newSelectedValue = selector(newValue);
-        if (isBailout(newSelectedValue)) {
-          return;
-        }
-        if (newSelectedValue !== latestSelectedValue.current) {
-          // Because newSelectedValue might be a function, we have to always use the reducer form of setState.
-          setSelectedValue(() => newSelectedValue);
-        }
-      };
-      handle.addSubscriber(sub);
-      return () => {
-        handle.removeSubscriber(sub);
-      };
-    },
-    [handle, selector]
-  );
+  useLayoutEffect(() => {
+    const sub = (newValue) => {
+      const newSelectedValue = selector(newValue);
+      if (isBailout(newSelectedValue)) {
+        return;
+      }
+      const newValueMatchesPrevious = memoResolver
+        ? memoResolver(newSelectedValue, latestSelectedValue.current)
+        : newSelectedValue === latestSelectedValue.current;
+      if (!newValueMatchesPrevious) {
+        // Because newSelectedValue might be a function, we have to always use the reducer form of setState.
+        setSelectedValue(() => newSelectedValue);
+      }
+    };
+    handle.addSubscriber(sub);
+    return () => {
+      handle.removeSubscriber(sub);
+    };
+  }, [handle, memoResolver, selector]);
 
   return selectedValue;
 }

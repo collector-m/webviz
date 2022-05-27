@@ -12,6 +12,7 @@ import React, { useState, useCallback } from "react";
 import TimeBasedChart from "./index";
 import { MockMessagePipelineProvider } from "webviz-core/src/components/MessagePipeline";
 import { triggerWheel } from "webviz-core/src/stories/PanelSetup";
+import { useDelayedEffect } from "webviz-core/src/util/hooks";
 
 const dataX = 0.000057603000000000004;
 const dataY = 5.544444561004639;
@@ -86,6 +87,8 @@ const props = {
   xAxisIsPlaybackTime: true,
 };
 
+const DEFAULT_DELAY = 500;
+
 function CleansUpTooltipExample() {
   const [hasRenderedOnce, setHasRenderedOnce] = useState<boolean>(false);
   const refFn = useCallback(() => {
@@ -139,17 +142,14 @@ function ZoomExample() {
 function PauseFrameExample() {
   const [, forceUpdate] = useState(0);
   const [unpauseFrameCount, setUnpauseFrameCount] = useState(0);
-  const pauseFrame = useCallback(
-    () => {
-      return () => {
-        // Set a limit here to avoid unlimited cascading updates.
-        if (unpauseFrameCount < 2) {
-          setUnpauseFrameCount(unpauseFrameCount + 1);
-        }
-      };
-    },
-    [unpauseFrameCount, setUnpauseFrameCount]
-  );
+  const pauseFrame = useCallback(() => {
+    return () => {
+      // Set a limit here to avoid unlimited cascading updates.
+      if (unpauseFrameCount < 2) {
+        setUnpauseFrameCount(unpauseFrameCount + 1);
+      }
+    };
+  }, [unpauseFrameCount, setUnpauseFrameCount]);
 
   const refFn = useCallback(() => {
     setTimeout(() => {
@@ -179,21 +179,18 @@ function RemoveChartExample() {
   const [, forceUpdate] = useState(0);
   const [showChart, setShowChart] = useState(true);
   const [statusMessage, setStatusMessage] = useState("FAILURE - START");
-  const pauseFrame = useCallback(
-    () => {
-      if (showChart) {
-        setShowChart(false);
+  const pauseFrame = useCallback(() => {
+    if (showChart) {
+      setShowChart(false);
+    }
+    return () => {
+      if (statusMessage === "FAILURE - START") {
+        setStatusMessage("SUCCESS");
+      } else {
+        setStatusMessage("FAILURE - CANNOT CALL RESUME FRAME TWICE");
       }
-      return () => {
-        if (statusMessage === "FAILURE - START") {
-          setStatusMessage("SUCCESS");
-        } else {
-          setStatusMessage("FAILURE - CANNOT CALL RESUME FRAME TWICE");
-        }
-      };
-    },
-    [showChart, setShowChart, statusMessage, setStatusMessage]
-  );
+    };
+  }, [showChart, setShowChart, statusMessage, setStatusMessage]);
 
   const refFn = useCallback(() => {
     setTimeout(() => {
@@ -227,18 +224,18 @@ storiesOf("<TimeBasedChart>", module)
     );
   })
   .add("with vertical bar, no tooltip", () => {
+    useDelayedEffect(
+      React.useCallback(() => {
+        const [canvas] = document.getElementsByTagName("canvas");
+        const { top, left } = canvas.getBoundingClientRect();
+        // This will show the vertical bar but not the tooltip because the mouse is on top of a different element
+        // (in this case the document), not the canvas itself.
+        document.dispatchEvent(new MouseEvent("mousemove", { clientX: 363 + left, clientY: 400 + top }));
+      }, []),
+      DEFAULT_DELAY // ms
+    );
     return (
-      <div
-        style={{ width: "100%", height: "100%", background: "black" }}
-        ref={() => {
-          setTimeout(() => {
-            const [canvas] = document.getElementsByTagName("canvas");
-            const { top, left } = canvas.getBoundingClientRect();
-            // This will show the vertical bar but not the tooltip because the mouse is on top of a different element
-            // (in this case the document), not the canvas itself.
-            document.dispatchEvent(new MouseEvent("mousemove", { clientX: 363 + left, clientY: 400 + top }));
-          }, 200);
-        }}>
+      <div style={{ width: "100%", height: "100%", background: "black" }}>
         <MockMessagePipelineProvider>
           <TimeBasedChart {...props} />
         </MockMessagePipelineProvider>
@@ -246,16 +243,16 @@ storiesOf("<TimeBasedChart>", module)
     );
   })
   .add("with tooltip and vertical bar", () => {
+    useDelayedEffect(
+      React.useCallback(() => {
+        const [canvas] = document.getElementsByTagName("canvas");
+        const { top, left } = canvas.getBoundingClientRect();
+        canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: 363 + left, clientY: 400 + top }));
+      }, []),
+      DEFAULT_DELAY // ms
+    );
     return (
-      <div
-        style={{ width: "100%", height: "100%", background: "black" }}
-        ref={() => {
-          setTimeout(() => {
-            const [canvas] = document.getElementsByTagName("canvas");
-            const { top, left } = canvas.getBoundingClientRect();
-            canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: 363 + left, clientY: 400 + top }));
-          }, 200);
-        }}>
+      <div style={{ width: "100%", height: "100%", background: "black" }}>
         <MockMessagePipelineProvider>
           <TimeBasedChart {...props} />
         </MockMessagePipelineProvider>

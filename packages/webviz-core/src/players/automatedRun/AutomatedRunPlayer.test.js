@@ -6,15 +6,20 @@
 //  found in the LICENSE file in the root directory of this source tree.
 //  You may not use this file except in compliance with the License.
 
-import TestProvider from "../TestProvider";
+import { TimeUtil } from "rosbag";
+
+import TestProvider, { defaultStart, defaultEnd } from "../TestProvider";
 import AutomatedRunPlayer, { type AutomatedRunClient, AUTOMATED_RUN_START_DELAY } from "./AutomatedRunPlayer";
 import delay from "webviz-core/shared/delay";
 import signal from "webviz-core/shared/signal";
 import { type Progress } from "webviz-core/src/players/types";
+import sendNotification from "webviz-core/src/util/sendNotification";
 
 class TestRunClient implements AutomatedRunClient {
   speed = 1;
   msPerFrame = 20000;
+  rangeStartTime = undefined;
+  rangeEndTime = undefined;
   shouldLoadDataBeforePlaying = false;
 
   finished = false;
@@ -33,7 +38,9 @@ class TestRunClient implements AutomatedRunClient {
   }
   markTotalFrameEnd() {}
   markFrameRenderStart() {}
-  markFrameRenderEnd() {}
+  markFrameRenderEnd() {
+    return 0;
+  }
   markPreloadStart = jest.fn();
   markPreloadEnd = jest.fn();
   async onFrameFinished() {}
@@ -42,13 +49,15 @@ class TestRunClient implements AutomatedRunClient {
   }
 }
 
+const getMessagesResult = { parsedMessages: [], rosBinaryMessages: undefined, bobjects: [] };
+
 /* eslint-disable no-underscore-dangle */
 describe("AutomatedRunPlayer", () => {
   it("waits to start playing until all frames are loaded when shouldLoadDataBeforePlaying=true", async () => {
-    const provider = new TestProvider({ getMessages: async () => [] });
+    const provider = new TestProvider({ getMessages: async () => getMessagesResult });
     const client = new TestRunClient({ shouldLoadDataBeforePlaying: true });
     const player = new AutomatedRunPlayer(provider, client);
-    player.setSubscriptions([{ topic: "/foo/bar" }]);
+    player.setSubscriptions([{ topic: "/foo/bar", format: "parsedMessages" }]);
     await delay(AUTOMATED_RUN_START_DELAY + 10);
     expect(player._initialized).toEqual(true);
     expect(player._isPlaying).toEqual(false);
@@ -63,7 +72,7 @@ describe("AutomatedRunPlayer", () => {
   });
 
   it("measures preloading performance", async () => {
-    const provider = new TestProvider({ getMessages: async () => [] });
+    const provider = new TestProvider({ getMessages: async () => getMessagesResult });
     const client = new TestRunClient({ shouldLoadDataBeforePlaying: true });
     const player = new AutomatedRunPlayer(provider, client);
     let emitStateCalls = 0;
@@ -75,7 +84,7 @@ describe("AutomatedRunPlayer", () => {
     expect(client.markPreloadEnd.mock.calls.length).toBe(0);
     expect(emitStateCalls).toBe(0);
 
-    player.setSubscriptions([{ topic: "/foo/bar" }]);
+    player.setSubscriptions([{ topic: "/foo/bar", format: "parsedMessages" }]);
     await delay(AUTOMATED_RUN_START_DELAY + 10);
 
     // Preloading has started but not finished.
@@ -112,13 +121,13 @@ describe("AutomatedRunPlayer", () => {
     const provider = new TestProvider({
       getMessages: async (startTime, endTime) => {
         frames.push({ startTime, endTime });
-        return [];
+        return getMessagesResult;
       },
     });
     const client = new TestRunClient();
 
     const player = new AutomatedRunPlayer(provider, client);
-    player.setSubscriptions([{ topic: "/foo/bar" }]);
+    player.setSubscriptions([{ topic: "/foo/bar", format: "parsedMessages" }]);
     await delay(AUTOMATED_RUN_START_DELAY + 10);
     expect(player._initialized).toEqual(true);
     expect(player._isPlaying).toEqual(true);
@@ -133,14 +142,43 @@ describe("AutomatedRunPlayer", () => {
       previousEmitSignal.resolve();
       await delay(1);
     }
-    expect(frames).toEqual([
-      { startTime: { sec: 10, nsec: 0 }, endTime: { sec: 10, nsec: 0 } },
-      { startTime: { sec: 10, nsec: 0 }, endTime: { sec: 30, nsec: 0 } },
-      { startTime: { sec: 30, nsec: 1 }, endTime: { sec: 50, nsec: 1 } },
-      { startTime: { sec: 50, nsec: 2 }, endTime: { sec: 70, nsec: 2 } },
-      { startTime: { sec: 70, nsec: 3 }, endTime: { sec: 90, nsec: 3 } },
-      { startTime: { sec: 90, nsec: 4 }, endTime: { sec: 100, nsec: 0 } },
-    ]);
+    expect(frames).toMatchSnapshot();
+  });
+
+  it("makes calls to getMessages within the provider's range", async () => {
+    const provider = new TestProvider({
+      getMessages: async (startTime, endTime) => {
+        expect(TimeUtil.compare(startTime, defaultStart) >= 0).toBeTruthy();
+        expect(TimeUtil.compare(endTime, defaultEnd) <= 0).toBeTruthy();
+        return getMessagesResult;
+      },
+    });
+    const client = new TestRunClient();
+    client.msPerFrame = 500;
+    const player = new AutomatedRunPlayer(provider, client);
+    player.setMessageOrder("headerStamp");
+    player.setSubscriptions([{ topic: "/foo/bar", format: "parsedMessages" }]);
+    const listener = { signal: signal() };
+    player.setListener(() => listener.signal);
+    while (!client.finished) {
+      // Resolve the previous emit promise, then go to the next frame.
+      const previousEmitSignal = listener.signal;
+      listener.signal = signal();
+      previousEmitSignal.resolve();
+      await delay(1);
+    }
+  });
+
+  it("ignores warnings and info notifications", async () => {
+    const provider = new TestProvider({ getMessages: async () => getMessagesResult });
+    const client = new TestRunClient({ shouldLoadDataBeforePlaying: true });
+    new AutomatedRunPlayer(provider, client);
+
+    expect(() => {
+      sendNotification("Some warning", "message", "user", "warn");
+      sendNotification("Some info", "message", "user", "info");
+    }).not.toThrow();
+    sendNotification.expectCalledDuringTest();
   });
 
   async function setupEventLoopTest() {
@@ -155,7 +193,7 @@ describe("AutomatedRunPlayer", () => {
     function resolveNextGetMessages() {
       const previousGetMessagesSignal = getMessagesSignal.signal;
       getMessagesSignal.signal = signal();
-      previousGetMessagesSignal.resolve([]);
+      previousGetMessagesSignal.resolve(getMessagesResult);
     }
 
     const listener = { signal: signal() };
@@ -167,7 +205,7 @@ describe("AutomatedRunPlayer", () => {
 
     const client = new TestRunClient();
     const player = new AutomatedRunPlayer(provider, client);
-    player.setSubscriptions([{ topic: "/foo/bar" }]);
+    player.setSubscriptions([{ topic: "/foo/bar", format: "parsedMessages" }]);
     await delay(AUTOMATED_RUN_START_DELAY + 10);
     player.setListener(() => listener.signal);
 

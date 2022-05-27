@@ -7,8 +7,8 @@
 //  You may not use this file except in compliance with the License.
 
 import { type FieldReader, Uint8Reader, getReader } from "./readers";
-import { DATATYPE, type VertexBuffer } from "./types";
-import { type ColorMode } from "webviz-core/src/panels/ThreeDimensionalViz/TopicSettingsEditor/PointCloudSettingsEditor";
+import { DATATYPE, type VertexBuffer, type ColorMode } from "./types";
+import maybeConvertSphericalCoordinatePointCloudToCartesian from "webviz-core/src/panels/ThreeDimensionalViz/commands/utils/maybeConvertSphericalCoordinatePointCloudToCartesian";
 import type { PointField } from "webviz-core/src/types/Messages";
 
 export type FieldOffsetsAndReaders = {
@@ -108,17 +108,34 @@ function extractValues({
   };
 }
 
+type PointCloudData = $ReadOnly<{|
+  data: Uint8Array,
+  fields: FieldOffsetsAndReaders,
+  pointCount: number,
+  stride: number,
+  sphericalRangeScale?: number,
+|}>;
+
 export function createPositionBuffer({
   data,
   fields,
   pointCount,
   stride,
+  sphericalRangeScale,
 }: {|
-  data: Uint8Array,
-  fields: FieldOffsetsAndReaders,
-  pointCount: number,
-  stride: number,
+  ...PointCloudData,
 |}): VertexBuffer {
+  const positions = maybeConvertSphericalCoordinatePointCloudToCartesian({
+    data,
+    fields,
+    pointCount,
+    stride,
+    sphericalRangeScale,
+  });
+  if (positions) {
+    return positions;
+  }
+
   // Check if all position components are stored next to each other
   const positionIsValid =
     fields.y.offset - fields.x.offset === FLOAT_SIZE && fields.z.offset - fields.y.offset === FLOAT_SIZE;

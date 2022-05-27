@@ -21,7 +21,8 @@ import Tooltip from "webviz-core/src/components/Tooltip";
 import { ThreeDimensionalVizContext } from "webviz-core/src/panels/ThreeDimensionalViz/ThreeDimensionalVizContext";
 import { canEditDatatype } from "webviz-core/src/panels/ThreeDimensionalViz/TopicSettingsEditor";
 import { TopicTreeContext } from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/useTopicTree";
-import { SECOND_SOURCE_PREFIX } from "webviz-core/src/util/globalConstants";
+import type { StructuralDatatypes } from "webviz-core/src/panels/ThreeDimensionalViz/utils/datatypes";
+import { $WEBVIZ_SOURCE_2 } from "webviz-core/src/util/globalConstants";
 import { useGuaranteedContext } from "webviz-core/src/util/hooks";
 import { colors } from "webviz-core/src/util/sharedStyleConstants";
 import { joinTopics } from "webviz-core/src/util/topicUtils";
@@ -108,11 +109,13 @@ type Props = {|
   visibleByColumn: (?boolean)[],
   sceneErrors: ?(string[]),
   setCurrentEditingTopic: SetCurrentEditingTopic,
+  structuralDatatypes: StructuralDatatypes,
   derivedCustomSettings: ?DerivedCustomSettings,
   width: number,
   filterText: string,
   tooltips?: Node[],
   visibleTopicsCount: number,
+  diffModeEnabled: boolean,
 |};
 
 export default function TreeNodeRow({
@@ -127,16 +130,18 @@ export default function TreeNodeRow({
   nodeVisibleInScene,
   sceneErrors,
   setCurrentEditingTopic,
+  structuralDatatypes,
   tooltips,
   visibleByColumn,
   visibleTopicsCount,
   width,
+  diffModeEnabled,
 }: Props) {
   const topicName = node.type === "topic" ? node.topicName : "";
   const datatype = node.type === "topic" ? node.datatype : undefined;
 
   const isDefaultSettings = derivedCustomSettings?.isDefaultSettings || !derivedCustomSettings;
-  const showTopicSettings = topicName && datatype && canEditDatatype(datatype);
+  const showTopicSettings = topicName && datatype && canEditDatatype(datatype, structuralDatatypes);
   const showTopicSettingsChanged = showTopicSettings && !isDefaultSettings;
 
   const showTopicError = node.type === "topic" && sceneErrors && sceneErrors.length > 0;
@@ -172,17 +177,20 @@ export default function TreeNodeRow({
   maxNodeNameWidth -= showVisibleTopicsCount ? VISIBLE_COUNT_WIDTH + VISIBLE_COUNT_MARGIN * 2 : 0;
 
   const { setHoveredMarkerMatchers } = useContext(ThreeDimensionalVizContext);
+  const updateHoveredMarkerMatchers = useCallback((columnIndex, visible) => {
+    if (visible) {
+      const topic = [topicName, joinTopics($WEBVIZ_SOURCE_2, topicName)][columnIndex];
+      setHoveredMarkerMatchers([{ topic }]);
+    }
+  }, [setHoveredMarkerMatchers, topicName]);
+
   const onMouseLeave = useCallback(() => setHoveredMarkerMatchers([]), [setHoveredMarkerMatchers]);
-  const mouseEventHandlersByColumnIdx = useMemo(
-    () => {
-      const topicNameByColumnIdx = [topicName, joinTopics(SECOND_SOURCE_PREFIX, topicName)];
-      return topicNameByColumnIdx.map((topic, columnIndex) => ({
-        onMouseEnter: () => (visibleByColumn[columnIndex] && setHoveredMarkerMatchers([{ topic }])) || undefined, // Satisfy Flow
-        onMouseLeave,
-      }));
-    },
-    [onMouseLeave, setHoveredMarkerMatchers, topicName, visibleByColumn]
-  );
+  const mouseEventHandlersByColumnIdx = useMemo(() => {
+    return new Array(2).fill().map((_, columnIndex) => ({
+      onMouseEnter: () => updateHoveredMarkerMatchers(columnIndex, true),
+      onMouseLeave,
+    }));
+  }, [onMouseLeave, updateHoveredMarkerMatchers]);
   const {
     toggleCheckAllAncestors,
     toggleNodeChecked,
@@ -248,30 +256,44 @@ export default function TreeNodeRow({
       <SRightActions>
         {providerAvailable && (
           <SToggles>
-            {availableByColumn.map((available, columnIdx) => (
-              <VisibilityToggle
-                available={available}
-                dataTest={`visibility-toggle~${key}~column${columnIdx}`}
-                key={columnIdx}
-                size={node.type === "topic" ? "SMALL" : "NORMAL"}
-                overrideColor={(derivedCustomSettings?.overrideColorByColumn || [])[columnIdx]}
-                checked={checkedKeysSet.has(columnIdx === 1 ? featureKey : key)}
-                onToggle={() => toggleNodeChecked(key, columnIdx)}
-                onShiftToggle={() => toggleCheckAllDescendants(key, columnIdx)}
-                onAltToggle={() => toggleCheckAllAncestors(key, columnIdx)}
-                unavailableTooltip={
-                  node.type === "group" ? "None of the topics in this group are currently available" : "Unavailable"
-                }
-                visibleInScene={!!visibleByColumn[columnIdx]}
-                {...mouseEventHandlersByColumnIdx[columnIdx]}
-              />
-            ))}
+            {availableByColumn.map((available, columnIdx) => {
+              const checked = checkedKeysSet.has(columnIdx === 1 ? featureKey : key);
+              return (
+                <VisibilityToggle
+                  available={available}
+                  dataTest={`visibility-toggle~${key}~column${columnIdx}`}
+                  key={columnIdx}
+                  size={node.type === "topic" ? "SMALL" : "NORMAL"}
+                  overrideColor={(derivedCustomSettings?.overrideColorByColumn || [])[columnIdx]}
+                  checked={checked}
+                  onToggle={() => {
+                    toggleNodeChecked(key, columnIdx);
+                    updateHoveredMarkerMatchers(columnIdx, !checked);
+                  }}
+                  onShiftToggle={() => {
+                    toggleCheckAllDescendants(key, columnIdx);
+                    updateHoveredMarkerMatchers(columnIdx, !checked);
+                  }}
+                  onAltToggle={() => {
+                    toggleCheckAllAncestors(key, columnIdx);
+                    updateHoveredMarkerMatchers(columnIdx, !checked);
+                  }}
+                  unavailableTooltip={
+                    node.type === "group" ? "None of the topics in this group are currently available" : "Unavailable"
+                  }
+                  visibleInScene={!!visibleByColumn[columnIdx]}
+                  {...mouseEventHandlersByColumnIdx[columnIdx]}
+                  diffModeEnabled={diffModeEnabled}
+                  columnIndex={columnIdx}
+                />
+              );
+            })}
           </SToggles>
         )}
         <TreeNodeMenu
           datatype={showTopicSettings ? datatype : undefined}
-          disableBaseColumn={!availableByColumn[0]}
-          disableFeatureColumn={!availableByColumn[1]}
+          disableBaseColumn={diffModeEnabled || !availableByColumn[0]}
+          disableFeatureColumn={diffModeEnabled || !availableByColumn[1]}
           hasFeatureColumn={hasFeatureColumn && availableByColumn[1]}
           nodeKey={key}
           providerAvailable={providerAvailable}

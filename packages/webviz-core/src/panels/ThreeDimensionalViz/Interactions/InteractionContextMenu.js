@@ -1,6 +1,6 @@
 // @flow
 //
-//  Copyright (c) 2018-present, Cruise LLC
+//  Copyright (c) 2020-present, Cruise LLC
 //
 //  This source code is licensed under the Apache License, Version 2.0,
 //  found in the LICENSE file in the root directory of this source tree.
@@ -10,9 +10,10 @@ import React, { useCallback, useContext, useEffect } from "react";
 import { type MouseEventObject } from "regl-worldview";
 import styled from "styled-components";
 
-import type { InteractionData } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/types";
+import type { SelectedObject } from "webviz-core/src/panels/ThreeDimensionalViz/Interactions/types";
+import { type ClickedPosition } from "webviz-core/src/panels/ThreeDimensionalViz/Layout";
 import { ThreeDimensionalVizContext } from "webviz-core/src/panels/ThreeDimensionalViz/ThreeDimensionalVizContext";
-import { type ClickedPosition } from "webviz-core/src/panels/ThreeDimensionalViz/TopicTree/Layout";
+import { getInteractionData, getObject } from "webviz-core/src/panels/ThreeDimensionalViz/threeDimensionalVizUtils";
 import { colors } from "webviz-core/src/util/sharedStyleConstants";
 
 const SInteractionContextMenu = styled.div`
@@ -63,11 +64,11 @@ const SId = styled.span`
 
 type Props = {
   clickedPosition: ClickedPosition,
-  selectedObjects: MouseEventObject[],
-  onSelectObject: (MouseEventObject) => void,
+  clickedObjects: MouseEventObject[],
+  selectObject: (MouseEventObject) => void,
 };
 
-export default function InteractionContextMenu({ selectedObjects = [], clickedPosition = {}, onSelectObject }: Props) {
+export default function InteractionContextMenu({ clickedObjects = [], clickedPosition = {}, selectObject }: Props) {
   return (
     <SInteractionContextMenu
       style={{
@@ -75,13 +76,8 @@ export default function InteractionContextMenu({ selectedObjects = [], clickedPo
         left: clickedPosition.clientX,
       }}>
       <SMenu>
-        {selectedObjects.map(({ object, instanceIndex }, index) => (
-          <InteractionContextMenuItem
-            key={index}
-            object={object}
-            instanceIndex={instanceIndex}
-            onSelectObject={onSelectObject}
-          />
+        {clickedObjects.map((interactiveObject, index) => (
+          <InteractionContextMenuItem key={index} interactiveObject={interactiveObject} selectObject={selectObject} />
         ))}
       </SMenu>
     </SInteractionContextMenu>
@@ -89,18 +85,14 @@ export default function InteractionContextMenu({ selectedObjects = [], clickedPo
 }
 
 function InteractionContextMenuItem({
-  object,
-  onSelectObject,
-  instanceIndex,
+  interactiveObject,
+  selectObject,
 }: {
-  object: {
-    id: any,
-    ns?: string,
-    interactionData?: ?InteractionData,
-  },
-  onSelectObject: (MouseEventObject) => void,
-  instanceIndex?: number,
+  selectObject: (?SelectedObject) => void,
+  interactiveObject?: MouseEventObject,
 }) {
+  const object = getObject(interactiveObject);
+  const topic = getInteractionData(interactiveObject)?.topic;
   const menuText = (
     <>
       {object.id && <SId>{object.id}</SId>}
@@ -108,33 +100,25 @@ function InteractionContextMenuItem({
     </>
   );
 
-  const topic = object.interactionData?.topic;
   const { setHoveredMarkerMatchers } = useContext(ThreeDimensionalVizContext);
-  const onMouseEnter = useCallback(
-    () => {
-      if (topic) {
-        const { id, ns } = object;
-        const checks = [{ markerKeyPath: ["id"], value: id }];
-        if (ns) {
-          checks.push({ markerKeyPath: ["ns"], value: ns });
-        }
-        return setHoveredMarkerMatchers([{ topic, checks }]);
+  const onMouseEnter = useCallback(() => {
+    if (topic) {
+      const { id, ns } = object;
+      const checks = [{ markerKeyPath: ["id"], value: id }];
+      if (ns) {
+        checks.push({ markerKeyPath: ["ns"], value: ns });
       }
-    },
-    [object, setHoveredMarkerMatchers, topic]
-  );
+      return setHoveredMarkerMatchers([{ topic, checks }]);
+    }
+  }, [object, setHoveredMarkerMatchers, topic]);
   const onMouseLeave = useCallback(() => setHoveredMarkerMatchers([]), [setHoveredMarkerMatchers]);
   useEffect(() => onMouseLeave, [onMouseLeave]);
 
-  const selectObject = useCallback(() => onSelectObject({ object, instanceIndex }), [
-    instanceIndex,
-    object,
-    onSelectObject,
-  ]);
+  const selectItemObject = useCallback(() => selectObject(interactiveObject), [interactiveObject, selectObject]);
 
   return (
     <SMenuItem onMouseEnter={onMouseEnter} onMouseLeave={onMouseLeave} data-test="InteractionContextMenuItem">
-      <STopic key={object.id || object.interactionData?.topic} onClick={selectObject}>
+      <STopic key={object.id || object.interactionData?.topic} onClick={selectItemObject}>
         {menuText}
         <STooltip>{menuText}</STooltip>
       </STopic>
